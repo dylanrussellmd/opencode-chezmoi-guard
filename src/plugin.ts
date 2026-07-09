@@ -6,6 +6,13 @@
  * actual editable source file (following symlinks, respecting modify
  * scripts, warning about templates) and then runs `chezmoi apply` to sync.
  *
+ * Additionally advises `read` executions (no arg rewrite, no apply): when
+ * the file read is a chezmoi-managed target whose source is a template,
+ * modify_ script, or encrypted entry, guidance is prepended to the read
+ * output so the agent learns where the editable source lives BEFORE it
+ * plans an edit — e.g. an `edit` oldString built from rendered template
+ * bytes would not match the redirected source file.
+ *
  * Sync semantics (see C1 in the design notes):
  *   The guard edits the SOURCE before the target is touched, so the normal
  *   `chezmoi apply` is non-interactive (target is clean). The `--no-tty`
@@ -25,6 +32,7 @@ import { _log, chezmoi, chezmoiInstalled, readSymlinkTarget, resolveSource } fro
 import {
   buildEncryptedGuidance,
   buildModifyGuidance,
+  buildReadGuidance,
   buildSymlinkGuidance,
   buildTemplateGuidance,
   levelToVariant,
@@ -34,6 +42,14 @@ import type { Redirect } from "./types.js";
 import { VERSION } from "./version.js";
 
 const INTERCEPTED_TOOLS = new Set(["edit", "write", "apply_patch"]);
+
+/**
+ * Tools that get a read-time ADVISORY only: args are never rewritten and no
+ * apply runs — the after-hook prepends guidance when the file's source kind
+ * would trip up a follow-up edit (template / modify_ / encrypted_). Stateless:
+ * needs no pending-map entry because `tool.execute.after` receives args.
+ */
+const ADVISED_TOOLS = new Set(["read"]);
 
 /** Minimal shape of the opencode TUI toast client we use. */
 interface PluginClientLike {
@@ -292,6 +308,31 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
 
     // ── AFTER hook ──────────────────────────────────────────────────────
     "tool.execute.after": async (input, output: AfterOutput | undefined) => {
+      // ── read advisory (stateless; no before-hook entry, no arg rewrite) ─
+      if (ADVISED_TOOLS.has(input.tool)) {
+        try {
+          if (!output) return;
+          const args = (input as { args?: Record<string, unknown> }).args;
+          const filePath = args?.filePath as string | undefined;
+          if (!filePath) return;
+
+          const resolved = pathResolve(filePath);
+          const info = resolveSource(resolved);
+          if (!info) return; // not managed
+
+          if (info.kind === "template" || info.kind === "modify" || info.kind === "encrypted") {
+            output.output =
+              buildReadGuidance(resolved, info.sourcePath, info.kind) + (output.output ?? "");
+            _log(`read advisory (${info.kind}): ${resolved}`);
+          }
+          // normal / symlink / run / exact: silent — edits are either
+          // transparently redirected or skipped, so a banner is pure noise.
+        } catch (err) {
+          _log(`read-advisory error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+
       const key = `${input.sessionID}:${input.callID}`;
       const redirect = pending.get(key);
       if (!redirect) return;

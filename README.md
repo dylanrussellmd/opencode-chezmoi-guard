@@ -23,6 +23,7 @@ When an opencode agent edits a file that lives under your chezmoi source, the ed
 - Asks `chezmoi managed` whether the target is chezmoi-managed.
 - If it is, rewrites the tool args to operate on the **source** file.
 - After the tool runs, executes `chezmoi apply --no-tty <target>` to sync the target from the freshly-edited source.
+- Advises `read` calls: reading a target whose source is a template, `modify_` script, or encrypted entry prepends guidance pointing at the editable source — **without** rewriting the read or hiding the real on-disk content.
 - Emits a TUI toast on every redirect, warning, or block.
 
 No more "the agent edited my dotfile but chezmoi ate the change."
@@ -50,6 +51,18 @@ Requires the `chezmoi` CLI on `PATH`. The plugin silently no-ops when chezmoi is
 | `modify_` | Passthrough with warning (partial file manager; target edits may be overwritten) |
 | `encrypted_` / `.age` / `.asc` | **BLOCKED** with guidance (use `chezmoi edit` instead) |
 | `run_` / `exact_` / directories | Skipped (scripts / structural markers) |
+
+## Read advisory
+
+`read` is never redirected — the agent always sees the real on-disk target bytes. But for three source kinds, a guidance block is prepended to the read output because a naive follow-up edit would misfire:
+
+| Source kind | Why reads need an advisory |
+| --- | --- |
+| `.tmpl` (template) | Rendered target bytes ≠ source bytes. An `edit` `oldString` built from the rendered content will not match the source file the guard redirects to. The advisory says: read the source first. |
+| `modify_` | The target is script-managed state; persistent changes belong in the modify script, so the advisory points at it. |
+| `encrypted_` / `.age` / `.asc` | Reading the plaintext target is fine, but edits are blocked — the advisory pre-empts a doomed edit plan with `chezmoi edit`. |
+
+Reads of `normal`/`symlink` targets stay silent: their edits are transparently redirected anyway, and a banner on every dotfile read would be pure context noise.
 
 ## Sync semantics
 
