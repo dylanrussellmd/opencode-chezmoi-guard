@@ -34,6 +34,7 @@
     "test": "vitest run --coverage",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
+    "version": "node scripts/sync-version.mjs && git add src/version.ts",
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run test"
   },
   "peerDependencies": {
