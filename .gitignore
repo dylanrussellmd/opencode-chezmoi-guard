@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.tsup/
+.omo/
+*.log
+.DS_Store
+.env
+.env.local
