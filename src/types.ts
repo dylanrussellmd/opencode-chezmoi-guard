@@ -7,8 +7,11 @@
  *   - run / exact / directories → skipped (scripts / structural markers)
  *   - modify_                   → passthrough with warning (partial file
  *                                 manager; target edits may be overwritten)
- *   - symlink_                  → read the link target, redirect to the
- *                                 actual file, apply after
+ *   - symlink_                  → read the link target, then recursively
+ *                                 resolve the target. If managed, redirect
+ *                                 to its source and apply the actual file.
+ *                                 If not managed, edit the actual file
+ *                                 directly and apply the symlink target.
  *   - encrypted_ / .age / .asc  → BLOCKED (cannot edit ciphertext)
  *   - .tmpl (templates)         → edit redirects to source + guidance;
  *                                 write warned (hits rendered target)

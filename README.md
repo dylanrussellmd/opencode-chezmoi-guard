@@ -26,8 +26,6 @@ When an opencode agent edits a file that lives under your chezmoi source, the ed
 - Advises `read` calls: reading a target whose source is a template, `modify_` script, or encrypted entry prepends guidance pointing at the editable source — **without** rewriting the read or hiding the real on-disk content.
 - Emits a TUI toast on every redirect, warning, or block.
 
-No more "the agent edited my dotfile but chezmoi ate the change."
-
 ## Install
 
 ```jsonc
@@ -76,10 +74,6 @@ CHEZMOI_GUARD_DEBUG=1 opencode
 
 Emits `[chezmoi-guard] ...` lines to stderr for every redirect, skip, warn, and block.
 
-## How it differs from a bare `.mjs` file path
-
-The original plugin was referenced as `plugin/chezmoi-guard/chezmoi-guard.mjs` — a local file path. opencode's plugin loader expects either an npm spec (`@scope/name`) or a `file://` URL for local plugins; a bare relative path is not reliably loaded as a plugin module. Publishing as an npm package and referencing it by name guarantees the loader imports and registers its hooks.
-
 ## Development
 
 ```sh
@@ -89,51 +83,6 @@ npm test             # vitest run --coverage
 npm run lint         # biome check
 npm run typecheck    # tsc --noEmit
 ```
-
-## Making changes & releasing
-
-You never run `npm publish` or touch an npm token. The only npm command in the loop is `npm version` (a local file-edit + git-commit helper), and even that is wrapped by the release script.
-
-### One-time setup (already done for this repo)
-
-Publishing uses npm **Trusted Publishing (OIDC)** — no `NPM_TOKEN` secret is stored. The `Release` workflow mints a short-lived OIDC token that npm trusts because this repo is registered as a trusted publisher on npmjs.com. If a release ever fails with a 403/404 on the publish step, register the trusted publisher on npmjs.com → package settings → *Trusted Publishers* → add:
-
-- Repository: `dylanrussellmd/opencode-chezmoi-guard`
-- Workflow filename: `release.yml`
-- Environment: *(leave blank)*
-
-### The workflow
-
-```sh
-# 1. Make your changes on main (or a PR, merged to main).
-npm test                 # full gate: lint + typecheck + build + test + coverage
-git add -A && git commit # commit your changes
-git push                 # push to main (CI runs the gate on node 20 + 22)
-
-# 2. Cut a release. The script:
-#      - refuses if main is dirty or out of sync with origin
-#      - bumps package.json + src/version.ts (via the `version` hook)
-#      - commits both as "<new-version>", tags vX.Y.Z
-#      - pushes main + the tag
-./scripts/release.sh patch    # 1.0.1 → 1.0.2
-# ./scripts/release.sh minor  # 1.0.1 → 1.1.0
-# ./scripts/release.sh major  # 1.0.1 → 2.0.0
-# ./scripts/release.sh 1.5.0  # explicit version
-
-# 3. Done. The Release workflow picks up the tag, re-runs the full gate,
-#    and publishes to npm with signed build provenance. Watch it:
-#    https://github.com/dylanrussellmd/opencode-chezmoi-guard/actions/workflows/release.yml
-```
-
-### What the release script guards against
-
-- **Dirty work tree** — uncommitted changes would get swept into the version commit or left behind.
-- **Wrong branch** — refuses to cut a release from anything but `main`.
-- **Diverged main** — local `main` must match `origin/main` so the tag lands on a commit the runner can check out.
-
-### How the version stays in sync
-
-`package.json` and `src/version.ts` must always agree. `scripts/sync-version.mjs` runs as the npm `version` lifecycle hook during `./scripts/release.sh`: after `npm version` bumps `package.json`, the hook rewrites `src/version.ts` to match and stages it, so both files land in the same commit. The Release workflow also verifies the tag (`vX.Y.Z`) matches `package.json` `version` exactly, failing loudly if they drift.
 
 ## License
 

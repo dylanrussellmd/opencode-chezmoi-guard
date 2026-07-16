@@ -199,6 +199,48 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
                 notify(client, "error", `Could not read symlink target from ${info.sourcePath}`);
                 continue;
               }
+
+              // Recursively resolve: the symlink target may itself be chezmoi-managed.
+              const actualInfo = resolveSource(actualPath);
+              if (actualInfo && actualInfo.kind !== "run" && actualInfo.kind !== "exact") {
+                if (actualInfo.kind === "encrypted") {
+                  notify(
+                    client,
+                    "error",
+                    `Encrypted file in patch: ${actualPath} — use \`chezmoi edit\``,
+                  );
+                  _log(`symlink→encrypted in patch (left as-is): ${actualPath}`);
+                  continue;
+                }
+                if (actualInfo.kind === "modify") {
+                  notify(
+                    client,
+                    "warn",
+                    `modify_ file in patch: ${actualPath} — changes may not persist`,
+                  );
+                  continue;
+                }
+                if (actualInfo.kind === "symlink") {
+                  notify(
+                    client,
+                    "warn",
+                    `Nested symlink in patch: ${actualPath} — use \`chezmoi edit\` directly`,
+                  );
+                  continue;
+                }
+                // template or normal → redirect patch to source, apply actualPath
+                newText = newText.split(actualPath).join(actualInfo.sourcePath);
+                applyTargets.add(actualPath);
+                hasRemap = true;
+                notify(
+                  client,
+                  "info",
+                  `symlink→source in patch: ${targetPath} → ${actualPath} → ${actualInfo.sourcePath}`,
+                );
+                continue;
+              }
+
+              // Target is not managed — patch the actual file directly
               newText = newText.split(targetPath).join(actualPath);
               applyTargets.add(targetPath);
               hasRemap = true;
@@ -261,6 +303,77 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
             notify(client, "error", `Could not read symlink target from ${info.sourcePath}`);
             return;
           }
+
+          // Recursively resolve: the symlink target may itself be chezmoi-managed.
+          // If so, redirect to its source (not the live file) and apply the
+          // actual file's target, not the original symlink path.
+          const actualInfo = resolveSource(actualPath);
+          if (actualInfo) {
+            if (actualInfo.kind === "run" || actualInfo.kind === "exact") {
+              _log(`symlink target skip (${actualInfo.kind}): ${actualPath}`);
+              return;
+            }
+            if (actualInfo.kind === "encrypted") {
+              pending.set(key, {
+                type: "encrypted",
+                source: actualInfo.sourcePath,
+                target: actualPath,
+              });
+              notify(
+                client,
+                "error",
+                `Encrypted file edit blocked: ${actualPath} → use \`chezmoi edit\``,
+              );
+              _log(`symlink→encrypted block: ${actualPath}`);
+              return;
+            }
+            if (actualInfo.kind === "modify") {
+              pending.set(key, {
+                type: "modify-warn",
+                source: actualInfo.sourcePath,
+                target: actualPath,
+              });
+              notify(client, "warn", `modify_ file edit: ${actualPath} — changes may not persist`);
+              _log(`symlink→modify passthrough: ${actualPath}`);
+              return;
+            }
+            if (actualInfo.kind === "template") {
+              output.args.filePath = actualInfo.sourcePath;
+              pending.set(key, {
+                type: "tmpl-edit",
+                source: actualInfo.sourcePath,
+                target: actualPath,
+              });
+              notify(
+                client,
+                "info",
+                `symlink→template: ${resolved} → ${actualPath} → ${actualInfo.sourcePath}`,
+              );
+              _log(`symlink→template redirect: ${actualPath} → ${actualInfo.sourcePath}`);
+              return;
+            }
+            if (actualInfo.kind === "symlink") {
+              notify(
+                client,
+                "warn",
+                `Nested symlink at ${actualPath} — use \`chezmoi edit\` directly`,
+              );
+              _log(`symlink→symlink (nested): ${actualPath}`);
+              return;
+            }
+            // Normal managed file — redirect to source, apply actualPath after
+            output.args.filePath = actualInfo.sourcePath;
+            pending.set(key, { type: "apply", source: actualInfo.sourcePath, target: actualPath });
+            notify(
+              client,
+              "info",
+              `symlink→source: ${resolved} → ${actualPath} → ${actualInfo.sourcePath}`,
+            );
+            _log(`symlink→source redirect: ${actualPath} → ${actualInfo.sourcePath}`);
+            return;
+          }
+
+          // The symlink target is not chezmoi-managed — edit it directly
           output.args.filePath = actualPath;
           pending.set(key, {
             type: "symlink",
@@ -320,13 +433,35 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
           const info = resolveSource(resolved);
           if (!info) return; // not managed
 
-          if (info.kind === "template" || info.kind === "modify" || info.kind === "encrypted") {
-            output.output =
-              buildReadGuidance(resolved, info.sourcePath, info.kind) + (output.output ?? "");
-            _log(`read advisory (${info.kind}): ${resolved}`);
+          // Follow symlinks: the symlink target may itself be chezmoi-managed.
+          // If so, emit guidance based on the actual file's source kind so the
+          // agent knows where the editable source lives before planning an edit.
+          let effectiveInfo = info;
+          let effectivePath = resolved;
+          if (info.kind === "symlink") {
+            const actualPath = readSymlinkTarget(info.sourcePath, resolved);
+            if (actualPath) {
+              const actualInfo = resolveSource(actualPath);
+              if (actualInfo) {
+                effectiveInfo = actualInfo;
+                effectivePath = actualPath;
+              }
+            }
           }
-          // normal / symlink / run / exact: silent — edits are either
-          // transparently redirected or skipped, so a banner is pure noise.
+
+          if (
+            effectiveInfo.kind === "template" ||
+            effectiveInfo.kind === "modify" ||
+            effectiveInfo.kind === "encrypted"
+          ) {
+            output.output =
+              buildReadGuidance(effectivePath, effectiveInfo.sourcePath, effectiveInfo.kind) +
+              (output.output ?? "");
+            _log(`read advisory (${effectiveInfo.kind}): ${effectivePath}`);
+          }
+          // normal / symlink (unmanaged target) / run / exact: silent —
+          // edits are transparently redirected or the file is not managed,
+          // so a banner is pure noise.
         } catch (err) {
           _log(`read-advisory error: ${err instanceof Error ? err.message : String(err)}`);
         }
