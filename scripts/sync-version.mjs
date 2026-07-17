@@ -19,7 +19,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const version = pkg.version;
 if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
-  process.stderr.write(`sync-version: invalid or missing package.json "version": ${String(version)}\n`);
+  process.stderr.write(
+    `sync-version: invalid or missing package.json "version": ${String(version)}\n`,
+  );
   process.exit(1);
 }
 

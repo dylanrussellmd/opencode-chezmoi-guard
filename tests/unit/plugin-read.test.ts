@@ -98,7 +98,7 @@ describe("read advisory (tool.execute.after)", () => {
     expect(out.output.endsWith("RAW-CONTENT")).toBe(true);
   });
 
-  for (const kind of ["normal", "symlink", "run", "exact"] as const) {
+  for (const kind of ["normal", "symlink", "run"] as const) {
     it(`stays silent for ${kind} sources`, async () => {
       resolveResult = resolved(kind, `/src/${kind}_thing`);
       const hooks = await loadHooks();

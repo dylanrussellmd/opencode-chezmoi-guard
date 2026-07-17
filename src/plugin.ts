@@ -168,7 +168,7 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
             const info = resolveSource(targetPath);
             if (!info) continue;
 
-            if (info.kind === "run" || info.kind === "exact") {
+            if (info.kind === "run") {
               _log(`apply_patch skip (${info.kind}): ${targetPath}`);
               continue;
             }
@@ -202,7 +202,7 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
 
               // Recursively resolve: the symlink target may itself be chezmoi-managed.
               const actualInfo = resolveSource(actualPath);
-              if (actualInfo && actualInfo.kind !== "run" && actualInfo.kind !== "exact") {
+              if (actualInfo && actualInfo.kind !== "run") {
                 if (actualInfo.kind === "encrypted") {
                   notify(
                     client,
@@ -270,8 +270,8 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
         const info = resolveSource(resolved);
         if (!info) return; // not managed
 
-        // run_ / exact_ / (dirs already filtered by H2) → skip
-        if (info.kind === "run" || info.kind === "exact") {
+        // run_ / (dirs already filtered by H2) → skip
+        if (info.kind === "run") {
           _log(`skip ${input.tool} (${info.kind}): ${resolved}`);
           return;
         }
@@ -309,7 +309,7 @@ export const ChezmoiGuardPlugin: Plugin = async (ctx) => {
           // actual file's target, not the original symlink path.
           const actualInfo = resolveSource(actualPath);
           if (actualInfo) {
-            if (actualInfo.kind === "run" || actualInfo.kind === "exact") {
+            if (actualInfo.kind === "run") {
               _log(`symlink target skip (${actualInfo.kind}): ${actualPath}`);
               return;
             }

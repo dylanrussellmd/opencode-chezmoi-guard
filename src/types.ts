@@ -4,7 +4,13 @@
  * Source-type handling classifies a chezmoi source path into one of these
  * kinds, which determines how the guard treats an edit targeting the
  * rendered file:
- *   - run / exact / directories → skipped (scripts / structural markers)
+ *   - run                        → skipped (script)
+ *   - directories                → skipped (excluded upstream by
+ *                                 `chezmoi managed --include=files,symlinks`)
+ *   - exact_ dirs                → NOT a skip kind. `exact_` is a directory
+ *                                 attribute (prunes target entries absent from
+ *                                 source); files inside an `exact_` dir are
+ *                                 normal editable files and redirect normally.
  *   - modify_                   → passthrough with warning (partial file
  *                                 manager; target edits may be overwritten)
  *   - symlink_                  → read the link target, then recursively
@@ -19,14 +25,7 @@
  *     executable_/empty_)       → redirect to source, apply after
  */
 
-export type SourceKind =
-  | "run"
-  | "modify"
-  | "symlink"
-  | "exact"
-  | "encrypted"
-  | "template"
-  | "normal";
+export type SourceKind = "run" | "modify" | "symlink" | "encrypted" | "template" | "normal";
 
 /** A resolved source mapping for a chezmoi-managed target. */
 export interface ResolveResult {

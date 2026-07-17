@@ -23,15 +23,7 @@ describe("levelToVariant", () => {
 });
 
 describe("kindLabel", () => {
-  const kinds: SourceKind[] = [
-    "run",
-    "modify",
-    "symlink",
-    "exact",
-    "encrypted",
-    "template",
-    "normal",
-  ];
+  const kinds: SourceKind[] = ["run", "modify", "symlink", "encrypted", "template", "normal"];
   for (const k of kinds) {
     it(`returns ${k} unchanged`, () => {
       expect(kindLabel(k)).toBe(k);

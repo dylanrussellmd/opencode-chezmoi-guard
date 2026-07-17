@@ -44,11 +44,12 @@ Requires the `chezmoi` CLI on `PATH`. The plugin silently no-ops when chezmoi is
 | Source prefix / suffix | Behaviour |
 | --- | --- |
 | `dot_` / `private_` / `executable_` / `empty_` (normal) | Redirect to source, `chezmoi apply` after |
+| `exact_` (directory attribute) | Files *inside* an `exact_` dir redirect normally — `exact_` only prunes absent target entries, it does not make files structural. Directories are excluded upstream by `chezmoi managed --include=files,symlinks`. |
 | `.tmpl` (template) | `edit` → redirect to source + guidance; `write` → warn (hits rendered target, lost on apply) |
 | `symlink_` | Read the link target, redirect to the actual file, `chezmoi apply` after |
 | `modify_` | Passthrough with warning (partial file manager; target edits may be overwritten) |
 | `encrypted_` / `.age` / `.asc` | **BLOCKED** with guidance (use `chezmoi edit` instead) |
-| `run_` / `exact_` / directories | Skipped (scripts / structural markers) |
+| `run_` / directories | Skipped (scripts / structural markers) |
 
 ## Read advisory
 

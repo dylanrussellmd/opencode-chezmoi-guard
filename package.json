@@ -14,11 +14,7 @@
       "import": "./dist/plugin.js"
     }
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "homepage": "https://github.com/dylanrussellmd/opencode-chezmoi-guard#readme",
   "bugs": "https://github.com/dylanrussellmd/opencode-chezmoi-guard/issues",
   "repository": {
@@ -58,14 +54,7 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": [
-    "opencode",
-    "opencode-plugin",
-    "chezmoi",
-    "dotfiles",
-    "file-manager",
-    "guard"
-  ],
+  "keywords": ["opencode", "opencode-plugin", "chezmoi", "dotfiles", "file-manager", "guard"],
   "publishConfig": {
     "access": "public"
   },

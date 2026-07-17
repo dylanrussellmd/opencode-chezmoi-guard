@@ -9,20 +9,34 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, resolve as pathResolve } from "node:path";
+import { basename, dirname, resolve as pathResolve } from "node:path";
 import type { ResolveResult, SourceKind } from "./types.js";
 
 // ─── Prefix patterns ────────────────────────────────────────────────────────
-// Order matters: a single source filename can carry several prefixes (e.g.
-// encrypted_private_dot_x.tmpl), so the most edit-restrictive classification
-// must win. classifyKind() checks encrypted before template before others.
+// All chezmoi kind-prefixes (run_, modify_, symlink_, encrypted_) are
+// *filename* attributes — they apply to the entry itself, never to its
+// descendants. `exact_` is a *directory* attribute (prunes target entries
+// absent from source); it has no kind here, and directories are excluded
+// upstream by `chezmoi managed --include=files,symlinks` regardless.
+//
+// classifyKind() therefore tests prefixes against the source path's BASENAME
+// only. A prior version tested `/(?:^|\/)prefix_/` against the whole path,
+// which matched any ancestor directory named `prefix_*` (e.g. a file at
+// `exact_dot_agents/.../default.json`, or `encrypted_dot_ssh/config`) and
+// misclassified normal files as exact/encrypted/etc., silently skipping or
+// blocking their edits. Anchoring to `^` on the basename is unambiguous:
+// chezmoi prefixes always sit at the start of the filename.
+//
+// Order still matters: a single source filename can carry several prefixes
+// (e.g. encrypted_private_dot_x.tmpl), so the most edit-restrictive
+// classification must win. classifyKind() checks encrypted before template
+// before others.
 
 export const PREFIX_RE = {
-  run: /(?:^|\/)run_/,
-  modify: /(?:^|\/)modify_/,
-  symlink: /(?:^|\/)symlink_/,
-  exact: /(?:^|\/)exact_/,
-  encrypted: /(?:^|\/)encrypted_/,
+  run: /^run_/,
+  modify: /^modify_/,
+  symlink: /^symlink_/,
+  encrypted: /^encrypted_/,
 } as const;
 
 export const ENCRYPTED_SUFFIX_RE = /\.(age|asc)$/;
@@ -77,19 +91,23 @@ export function chezmoiInstalled(): boolean {
 /**
  * Classify a source path into an edit-handling kind.
  *
+ * Tests prefixes against the path's BASENAME only — chezmoi kind-prefixes
+ * are filename attributes, so an ancestor directory named `run_*` /
+ * `encrypted_*` / etc. must not influence a descendant file's kind.
+ *
  * Encrypted is checked first (most restrictive — cannot edit ciphertext at
  * all). Then script/structural prefixes, since modify_/run_ may carry .tmpl.
  * Template (.tmpl suffix) is checked last.
  */
 export function classifyKind(sourcePath: string): SourceKind {
-  if (PREFIX_RE.encrypted.test(sourcePath) || ENCRYPTED_SUFFIX_RE.test(sourcePath)) {
+  const base = basename(sourcePath);
+  if (PREFIX_RE.encrypted.test(base) || ENCRYPTED_SUFFIX_RE.test(base)) {
     return "encrypted";
   }
-  if (PREFIX_RE.run.test(sourcePath)) return "run";
-  if (PREFIX_RE.modify.test(sourcePath)) return "modify";
-  if (PREFIX_RE.symlink.test(sourcePath)) return "symlink";
-  if (PREFIX_RE.exact.test(sourcePath)) return "exact";
-  if (sourcePath.endsWith(".tmpl")) return "template";
+  if (PREFIX_RE.run.test(base)) return "run";
+  if (PREFIX_RE.modify.test(base)) return "modify";
+  if (PREFIX_RE.symlink.test(base)) return "symlink";
+  if (base.endsWith(".tmpl")) return "template";
   return "normal";
 }
 
