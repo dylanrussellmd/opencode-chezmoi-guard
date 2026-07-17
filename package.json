@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/chezmoi-guard",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Redirect opencode agent edits to chezmoi source files, then sync. Intercepts edit/write/apply_patch so agents never edit chezmoi-managed targets out-of-band.",
   "license": "MIT",
   "author": "Dylan Russell",
@@ -14,7 +14,11 @@
       "import": "./dist/plugin.js"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "homepage": "https://github.com/dylanrussellmd/opencode-chezmoi-guard#readme",
   "bugs": "https://github.com/dylanrussellmd/opencode-chezmoi-guard/issues",
   "repository": {
@@ -54,7 +58,14 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["opencode", "opencode-plugin", "chezmoi", "dotfiles", "file-manager", "guard"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "chezmoi",
+    "dotfiles",
+    "file-manager",
+    "guard"
+  ],
   "publishConfig": {
     "access": "public"
   },
