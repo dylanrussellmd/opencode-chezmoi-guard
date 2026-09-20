@@ -1,37 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { extractPathsFromPatch } from "../../src/patch.js";
+import { extractPathsFromPatch, patchHeaders, rewritePatchHeaders } from "../../src/patch.js";
 
-describe("extractPathsFromPatch — opcode + unified-diff headers", () => {
-  it("extracts *** Update File marker", () => {
-    const p = "*** Update File: /home/u/.bashrc\n@@ -1 +1 @@";
-    expect(extractPathsFromPatch(p)[0]).toBe("/home/u/.bashrc");
+describe("native V2 patch headers", () => {
+  it("extracts Add/Update/Delete/Move paths with spaces and deduplicates", () => {
+    expect(
+      extractPathsFromPatch(
+        "*** Add File: a b\n*** Update File: c\n*** Move to: d\n*** Delete File: e\n*** Update File: c",
+      ),
+    ).toEqual(["a b", "c", "d", "e"]);
   });
-
-  it("extracts *** Create File marker", () => {
-    const p = "*** Create File: /home/u/.newrc\n@@ -0,0 +1 @@";
-    expect(extractPathsFromPatch(p).includes("/home/u/.newrc")).toBe(true);
+  it("ignores diff content, obsolete Create and unified headers", () => {
+    expect(
+      extractPathsFromPatch(
+        "+*** Update File: x\n *** Delete File: y\n*** Create File: z\n--- a/file\n+++ b/file",
+      ),
+    ).toEqual(["y"]);
   });
-
-  it("extracts unified --- / +++ with a//b/ prefixes", () => {
-    const p = "--- a/home/u/.gitconfig\n+++ b/home/u/.gitconfig";
-    expect(extractPathsFromPatch(p).includes("home/u/.gitconfig")).toBe(true);
-  });
-
-  it("excludes /dev/null", () => {
-    const p = "--- /dev/null\n+++ b/home/u/.created";
-    const paths = extractPathsFromPatch(p);
-    expect(paths.includes("/dev/null")).toBe(false);
-    expect(paths.includes("home/u/.created")).toBe(true);
-  });
-
-  it("multi-file patch yields all unique paths", () => {
-    const p = "*** Update File: /home/u/.bashrc\n*** Update File: /home/u/.config/git/config";
-    expect(extractPathsFromPatch(p).length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("deduplicates the same path appearing in --- and +++", () => {
-    const p = "--- a/home/u/.gitconfig\n+++ b/home/u/.gitconfig";
-    const paths = extractPathsFromPatch(p);
-    expect(paths.filter((x) => x === "home/u/.gitconfig").length).toBe(1);
+  it("preserves content, CRLF and literal dollars in replacement paths", () => {
+    const text = "*** Update File: old\r\n@@\r\n-old\r\n+old\r\n";
+    expect(patchHeaders(text)).toEqual([{ line: 0, operation: "Update", path: "old" }]);
+    expect(rewritePatchHeaders(text, new Map([[0, "/source/$&$1"]]))).toBe(
+      "*** Update File: /source/$&$1\r\n@@\r\n-old\r\n+old\r\n",
+    );
   });
 });

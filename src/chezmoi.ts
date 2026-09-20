@@ -8,8 +8,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { basename, dirname, resolve as pathResolve } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve as pathResolve } from "node:path";
 import type { ResolveResult, SourceKind } from "./types.js";
 
 // ─── Prefix patterns ────────────────────────────────────────────────────────
@@ -88,6 +88,49 @@ export function chezmoiInstalled(): boolean {
   return chezmoiAvailable === true;
 }
 
+/** Mutations require a fresh, validated inventory; failures are never unmanaged. */
+export function managedSources(): Map<string, ResolveResult> {
+  const output = chezmoi([
+    "managed",
+    "--include=files,symlinks",
+    "--path-style=all",
+    "--format=json",
+  ]);
+  if (output === null) {
+    throw new Error(
+      "[chezmoi-guard] Cannot verify managed paths: chezmoi lookup failed. Mutation blocked; repair chezmoi configuration or availability and retry.",
+    );
+  }
+  try {
+    const inventory: unknown = JSON.parse(output);
+    if (!inventory || typeof inventory !== "object" || Array.isArray(inventory))
+      throw new Error("invalid inventory");
+    const sources = new Map<string, ResolveResult>();
+    for (const entry of Object.values(inventory)) {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        typeof entry.absolute !== "string" ||
+        !isAbsolute(entry.absolute) ||
+        typeof entry.sourceAbsolute !== "string" ||
+        !isAbsolute(entry.sourceAbsolute)
+      ) {
+        throw new Error("invalid inventory entry");
+      }
+      sources.set(pathResolve(entry.absolute), {
+        sourcePath: entry.sourceAbsolute,
+        kind: classifyKind(entry.sourceAbsolute),
+        checkedAt: Date.now(),
+      });
+    }
+    return sources;
+  } catch {
+    throw new Error(
+      "[chezmoi-guard] Cannot verify managed paths: invalid chezmoi inventory. Mutation blocked.",
+    );
+  }
+}
+
 /**
  * Classify a source path into an edit-handling kind.
  *
@@ -119,6 +162,13 @@ export function classifyKind(sourcePath: string): SourceKind {
 export function resolveSource(targetPath: string): ResolveResult | null {
   if (!chezmoiInstalled()) return null;
 
+  // `managed --include=files,symlinks DIR` still lists DIR's descendants.
+  try {
+    if (lstatSync(targetPath).isDirectory()) return null;
+  } catch {
+    // A managed target may not have been created yet (patch Add/write).
+  }
+
   const now = Date.now();
   const cached = cache.get(targetPath);
   if (cached && now - cached.checkedAt < CACHE_TTL_MS) {
@@ -139,7 +189,9 @@ export function resolveSource(targetPath: string): ResolveResult | null {
   }
 
   // A single managed file/symlink target yields exactly one line; guard anyway.
-  const firstLine = sourcePath.split("\n")[0]?.trim() ?? "";
+  const lines = sourcePath.split("\n");
+  if (lines.length !== 1) return null;
+  const firstLine = lines[0]?.trim() ?? "";
   if (!firstLine) {
     cache.set(targetPath, { result: null, checkedAt: now });
     return null;
@@ -160,7 +212,9 @@ export function resolveSource(targetPath: string): ResolveResult | null {
  */
 export function readSymlinkTarget(sourcePath: string, targetPath: string): string | null {
   try {
-    const linkContent = readFileSync(sourcePath, "utf8").trim();
+    const linkContent = sourcePath.endsWith(".tmpl")
+      ? chezmoi(["execute-template", "--file", "--", sourcePath])
+      : readFileSync(sourcePath, "utf8").trim();
     if (!linkContent) return null;
     return pathResolve(dirname(targetPath), linkContent);
   } catch {

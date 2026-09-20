@@ -2,27 +2,21 @@
  * Shared types for chezmoi-guard.
  *
  * Source-type handling classifies a chezmoi source path into one of these
- * kinds, which determines how the guard treats an edit targeting the
- * rendered file:
- *   - run                        → skipped (script)
+ * kinds. All managed mutation targets are blocked in the conservative V2
+ * guard; these kinds select encrypted refusal and read advisory text:
+ *   - run                        → no read advisory
  *   - directories                → skipped (excluded upstream by
  *                                 `chezmoi managed --include=files,symlinks`)
  *   - exact_ dirs                → NOT a skip kind. `exact_` is a directory
  *                                 attribute (prunes target entries absent from
  *                                 source); files inside an `exact_` dir are
- *                                 normal editable files and redirect normally.
- *   - modify_                   → passthrough with warning (partial file
- *                                 manager; target edits may be overwritten)
- *   - symlink_                  → read the link target, then recursively
- *                                 resolve the target. If managed, redirect
- *                                 to its source and apply the actual file.
- *                                 If not managed, edit the actual file
- *                                 directly and apply the symlink target.
+ *                                 ordinary managed files.
+ *   - modify_                   → partial-file-manager read advisory
+ *   - symlink_                  → follow referent for read advisories only
  *   - encrypted_ / .age / .asc  → BLOCKED (cannot edit ciphertext)
- *   - .tmpl (templates)         → edit redirects to source + guidance;
- *                                 write warned (hits rendered target)
+ *   - .tmpl (templates)         → rendered-byte/source-byte read advisory
  *   - normal (dot_/private_/
- *     executable_/empty_)       → redirect to source, apply after
+ *     executable_/empty_)       → no special read advisory
  */
 
 export type SourceKind = "run" | "modify" | "symlink" | "encrypted" | "template" | "normal";
@@ -33,17 +27,3 @@ export interface ResolveResult {
   kind: SourceKind;
   checkedAt: number;
 }
-
-/**
- * Per-call redirect state stashed in a pending map keyed by
- * `${sessionID}:${callID}`. State is NOT smuggled through tool args (H1).
- * The after-hook reads it to decide what to sync or which guidance to emit.
- */
-export type Redirect =
-  | { type: "patch"; targets: string[] }
-  | { type: "encrypted"; source: string; target: string }
-  | { type: "tmpl-write-warn"; source: string; target: string }
-  | { type: "tmpl-edit"; source: string; target: string }
-  | { type: "symlink"; source: string; target: string; actual: string }
-  | { type: "modify-warn"; source: string; target: string }
-  | { type: "apply"; source: string; target: string };

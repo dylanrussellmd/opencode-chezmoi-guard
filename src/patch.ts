@@ -1,26 +1,45 @@
-/**
- * Extract file paths from an apply_patch / unified-diff payload.
- *
- * apply_patch uses `*** Update|Create File: <path>` opcodes; classic
- * unified diffs use `--- a/<path>` / `+++ b/<path>` headers. We collect
- * every distinct path and exclude `/dev/null` (new/deleted file marker).
- */
+/** V2 patch headers only: text in diff hunks is never a path substitution. */
+export interface PatchHeader {
+  line: number;
+  operation: "Add" | "Update" | "Delete" | "Move";
+  path: string;
+}
 
-/** Extract all distinct target paths referenced in a patch. */
-export function extractPathsFromPatch(patchText: string): string[] {
-  const paths = new Set<string>();
+const HEADER = /^(\*\*\* (Add File|Update File|Delete File|Move to): )(.+)$/;
 
-  for (const m of patchText.matchAll(/\*\*\*\s+(?:Update|Create)\s+File:\s+(.+)/g)) {
-    paths.add((m[1] ?? "").trim());
+export function patchHeaders(text: string): PatchHeader[] {
+  const headers: PatchHeader[] = [];
+  for (const [line, content] of text.split("\n").entries()) {
+    // OpenCode 2.0.8 trims outer whitespace on operation headers. Conservatively
+    // recognize those headers too; ignoring them would bypass the guard.
+    const match = HEADER.exec(content.trim());
+    if (!match) continue;
+    headers.push({
+      line,
+      operation: match[2]?.split(" ")[0] as PatchHeader["operation"],
+      path: (match[3] ?? "").trim(),
+    });
   }
-  for (const m of patchText.matchAll(/^---\s+(?:a\/)?(.+)$/gm)) {
-    const p = (m[1] ?? "").trim();
-    if (p !== "/dev/null") paths.add(p);
-  }
-  for (const m of patchText.matchAll(/^\+\+\+\s+(?:b\/)?(.+)$/gm)) {
-    const p = (m[1] ?? "").trim();
-    if (p !== "/dev/null") paths.add(p);
-  }
+  return headers;
+}
 
-  return [...paths];
+export function extractPathsFromPatch(text: string): string[] {
+  return [...new Set(patchHeaders(text).map((header) => header.path))];
+}
+
+export function rewritePatchHeaders(
+  text: string,
+  replacements: ReadonlyMap<number, string>,
+): string {
+  return text
+    .split("\n")
+    .map((line, index) => {
+      const path = replacements.get(index);
+      if (path === undefined) return line;
+      const cr = line.endsWith("\r") ? "\r" : "";
+      return (
+        line.replace(/\r$/, "").replace(HEADER, (_match, prefix: string) => `${prefix}${path}`) + cr
+      );
+    })
+    .join("\n");
 }

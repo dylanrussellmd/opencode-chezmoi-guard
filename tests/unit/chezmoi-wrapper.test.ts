@@ -20,6 +20,7 @@ beforeEach(() => {
     execFileSync: (cmd: string, args: string[]) => execMock(cmd, args),
   }));
   vi.doMock("node:fs", () => ({
+    lstatSync: () => ({ isDirectory: () => false }),
     readFileSync: (path: string, enc: string) => readFileSyncMock(path, enc),
   }));
 });
@@ -71,6 +72,59 @@ describe("chezmoi() subprocess wrapper", () => {
     // a later successful call still works (binary not blacklisted)
     expect(m.chezmoi(["--version"])).toBe("chezmoi version 2.58.0");
     expect(m.chezmoiInstalled()).toBe(true);
+  });
+});
+
+describe("mutation inventory (fail closed)", () => {
+  it("distinguishes a successful empty inventory from subprocess failure", async () => {
+    execMock = () => "{}";
+    const m = await load();
+    expect(m.managedSources().size).toBe(0);
+    execMock = () => {
+      throw new Error("configuration/decryption failure");
+    };
+    expect(() => m.managedSources()).toThrow("lookup failed");
+  });
+  it("blocks unavailable chezmoi even after an availability probe", async () => {
+    execMock = () => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    };
+    const m = await load();
+    expect(m.chezmoiInstalled()).toBe(false);
+    expect(() => m.managedSources()).toThrow("lookup failed");
+  });
+  for (const output of [
+    "",
+    "broken json",
+    "null",
+    "[]",
+    '{"x":{}}',
+    '{"x":{"absolute":"relative","sourceAbsolute":"/source"}}',
+  ]) {
+    it(`rejects invalid inventory ${output}`, async () => {
+      execMock = () => output;
+      const m = await load();
+      expect(() => m.managedSources()).toThrow("invalid chezmoi inventory");
+    });
+  }
+  it("uses fresh inventory and classifies encrypted paths without negative caching", async () => {
+    let calls = 0;
+    execMock = (_cmd, args) => {
+      expect(args).toEqual([
+        "managed",
+        "--include=files,symlinks",
+        "--path-style=all",
+        "--format=json",
+      ]);
+      return ++calls === 1
+        ? "{}"
+        : JSON.stringify({
+            ".secret": { absolute: "/target", sourceAbsolute: "/source/encrypted_dot_secret.age" },
+          });
+    };
+    const m = await load();
+    expect(m.managedSources().get("/target")).toBeUndefined();
+    expect(m.managedSources().get("/target")?.kind).toBe("encrypted");
   });
 });
 
@@ -133,6 +187,16 @@ describe("resolveSource", () => {
 });
 
 describe("readSymlinkTarget", () => {
+  it("renders templated symlink sources before resolving relative targets", async () => {
+    execMock = (_cmd, args) => {
+      expect(args).toEqual(["execute-template", "--file", "--", "/src/symlink_dot_vimrc.tmpl"]);
+      return "../rendered/vimrc\n";
+    };
+    const m = await load();
+    expect(m.readSymlinkTarget("/src/symlink_dot_vimrc.tmpl", "/home/u/.vimrc")).toBe(
+      "/home/rendered/vimrc",
+    );
+  });
   it("resolves a relative link target against the symlink's own directory", async () => {
     readFileSyncMock = () => "../dotfiles/vimrc\n";
     const m = await load();
