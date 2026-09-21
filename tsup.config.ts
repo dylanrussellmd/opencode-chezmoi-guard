@@ -11,6 +11,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: {
     plugin: "src/plugin.ts",
+    tui: "src/tui.ts",
   },
   format: ["esm"],
   target: "node20",

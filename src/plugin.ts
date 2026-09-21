@@ -1,5 +1,6 @@
 /** Native OpenCode 2.0.8 guard: no redirection or subprocess writes. */
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import type { Result } from "@opencode/plugin/promise/tool";
@@ -82,6 +83,8 @@ export const ChezmoiGuardPlugin: Plugin.Plugin = {
       path: string,
       sessionID: Parameters<typeof ctx.session.get>[0]["sessionID"],
     ) => {
+      if (path === "~") return homedir();
+      if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
       if (isAbsolute(path)) return resolve(path);
       return resolve((await ctx.session.get({ sessionID })).location.directory, path);
     };

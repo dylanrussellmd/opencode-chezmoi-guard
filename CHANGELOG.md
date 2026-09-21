@@ -1,6 +1,12 @@
 # Changelog
 
-## 2.0.0 (unpublished, security revision)
+## 2.0.1 (2026-09-20)
+
+- Match native OpenCode home-path expansion before managed-file checks, including `~` and `~/…` in edit/write inputs and patch headers.
+- Update the development dependency lock to patched versions; the full npm audit reports no known advisories.
+- Restore a read-only native terminal companion with session-scoped, deduplicated guard notifications and teardown cleanup. No apply or approval actions are exposed.
+
+## 2.0.0 (2026-09-20)
 
 - Removed automatic source redirection and subprocess apply after review identified a target-permission bypass. All managed target mutations now block before execution; explicit source edits retain native permission checks.
 - Mutation discovery now requires a fresh validated inventory and fails closed on subprocess/configuration/JSON errors. Successful unmanaged lookups still pass through.

@@ -41,7 +41,11 @@ Reads remain unchanged. Template, modify-script and encrypted-source advisories 
 
 Shell commands and arbitrary custom mutation tools are outside this plugin's interception scope. This is a guard for the named file tools, not a filesystem sandbox.
 
-Server plugins in 2.0.8 have no V1 `client.tui.toast` API. Tool errors/read advisories are agent-visible; TUI toast parity requires a separate CLI companion and remains unresolved.
+The package includes a native OpenCode 2.0.8 CLI companion through `./tui` (and `tui.mjs` for local directory discovery). Its mounted `app` slot observes the current session's cached messages and shows read-only toasts for guard tool failures and successful reads carrying guard advisories. It subscribes to native session events and checks the cache once per second to catch navigation and delayed cache updates. It makes no network polling requests and needs no Solid runtime.
+
+Notifications are deduplicated by session, message and tool-call identity for the lifetime of the companion. Opening a session can show previously recorded guard results once; multiple newly observed results are summarized in one toast. Background sessions are inspected only when opened. Full guidance stays in the tool result; paths and file contents are not copied into toasts. Unloading unsubscribes, stops the timer, unregisters the slot and clears the identity cache.
+
+There are no apply/approve controls, pending-change state, or filesystem operations in the companion. It consumes projected tool results rather than server-side V1 toast calls. Recognition is limited to the guard's failure prefix and exact boxed advisory headers; ordinary assistant/user text and unrelated tool failures are ignored. This is a notification convenience, not an authenticated provenance signal for tool output.
 
 ## Development and verification
 
@@ -54,5 +58,7 @@ npm run test:integration
 ```
 
 Unit tests use a mocked V2 hook context. `test:integration` uses real isolated chezmoi files/processes and the built package, but a **mocked OpenCode host**. Its permission-order test is a deterministic simulation, not evidence of a real-host authorization run. No real-host permission test has been completed.
+
+TUI regressions cover native message shapes, read advisories, per-session deduplication, delayed results, event batching, navigation, remounting and cleanup with a mocked cache/event host. An isolated OpenCode 2.0.8 PTY smoke verified companion loading and app-slot mounting. End-to-end notification delivery from a real native blocked tool call has not been verified.
 
 MIT © Dylan Russell

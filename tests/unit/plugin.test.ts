@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../../src/plugin.js";
@@ -71,6 +72,32 @@ beforeEach(() => {
 });
 
 describe("conservative V2 authorization boundary", () => {
+  for (const tool of ["edit", "write"]) {
+    for (const path of ["~", "~/managed"]) {
+      it(`expands home paths before ${tool} protection: ${path}`, async () => {
+        managed("normal", path === "~" ? homedir() : `${homedir()}/managed`);
+        const h = await harness();
+        await expect(h.before(event(tool, { path }))).rejects.toThrow(
+          "Managed target mutation blocked",
+        );
+      });
+    }
+  }
+  for (const tool of ["patch", "apply_patch"]) {
+    for (const header of ["Add File", "Update File", "Delete File", "Move to"]) {
+      it(`expands home paths in ${tool} ${header}`, async () => {
+        managed("normal", `${homedir()}/managed`);
+        const h = await harness();
+        await expect(
+          h.before(
+            event(tool, {
+              patchText: `*** Begin Patch\n*** Update File: /unmanaged\n@@\n-old\n+new\n*** ${header}: ~/managed\n*** End Patch`,
+            }),
+          ),
+        ).rejects.toThrow("Managed target mutation blocked");
+      });
+    }
+  }
   for (const kind of ["normal", "template", "modify", "symlink", "encrypted", "run"] as const) {
     for (const tool of ["edit", "write"]) {
       it(`blocks managed ${kind} ${tool} before any input rewrite`, async () => {

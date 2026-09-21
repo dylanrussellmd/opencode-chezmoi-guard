@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/chezmoi-guard",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Native OpenCode V2 guard: block managed target mutations, guide explicit source edits, and preserve host permission checks.",
   "license": "MIT",
   "author": "Dylan Russell",
@@ -12,10 +12,15 @@
     ".": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "files": [
     "dist",
+    "tui.mjs",
     "README.md",
     "CHANGELOG.md",
     "SECURITY.md",
@@ -52,11 +57,11 @@
     "@biomejs/biome": "^1.9.4",
     "@opencode/plugin": "2.0.8",
     "@types/node": "^20.14.0",
-    "@vitest/coverage-v8": "^4.1.5",
+    "@vitest/coverage-v8": "^4.1.11",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.6.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=20"
@@ -71,6 +76,12 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1",
+    "postcss": "^8.5.23",
+    "nanoid@3": "^3.3.18",
+    "@opentelemetry/core": "^2.8.0"
   },
   "pnpm": {
     "overrides": {
