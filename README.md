@@ -55,10 +55,11 @@ npm run typecheck
 npm test
 npm run build
 npm run test:integration
+python3 scripts/native-tui-smoke.py
 ```
 
-Unit tests use a mocked V2 hook context. `test:integration` uses real isolated chezmoi files/processes and the built package, but a **mocked OpenCode host**. Its permission-order test is a deterministic simulation, not evidence of a real-host authorization run. No real-host permission test has been completed.
+Unit tests use a mocked V2 hook context. `test:integration` uses real isolated chezmoi files/processes and the built package, but a **mocked OpenCode host**. Its source-allowed/target-denied permission-order test remains a deterministic simulation, not a real-host permission-policy matrix.
 
-TUI regressions cover native message shapes, read advisories, per-session deduplication, delayed results, event batching, navigation, remounting and cleanup with a mocked cache/event host. An isolated OpenCode 2.0.8 PTY smoke verified companion loading and app-slot mounting. End-to-end notification delivery from a real native blocked tool call has not been verified.
+TUI regressions cover native message shapes, read advisories, per-session deduplication, delayed results, event batching, navigation, remounting and cleanup with a mocked cache/event host. `scripts/native-tui-smoke.py` additionally runs an isolated real OpenCode 2.0.8 server and terminal with a scripted loopback model. It verifies a native patch is blocked, the refusal reaches the model, exactly one guard error toast renders, source/target bytes remain unchanged, and the companion and processes shut down cleanly. No real model credentials or user dotfiles are used. Set `TMPDIR` to select the fixture/evidence directory.
 
 MIT © Dylan Russell
