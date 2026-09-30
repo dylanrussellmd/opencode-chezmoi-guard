@@ -1,4 +1,4 @@
-/** Read-only notifications from OpenCode 2.0.8's projected session messages. */
+/** Read-only notifications from OpenCode's projected session messages. */
 import type { Plugin } from "@opencode/plugin/tui";
 import type { Context, ToastOptions } from "@opencode/plugin/tui/context";
 

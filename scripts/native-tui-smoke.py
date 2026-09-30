@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Real OpenCode 2.0.8 + chezmoi + PTY; only the model endpoint is synthetic.
+"""Real OpenCode (audited 2.0.8 or 2.0.19) + chezmoi + PTY; only the model endpoint is synthetic.
 
 Run npm run build, then python3 scripts/native-tui-smoke.py.
-Requires Linux, Python 3, chezmoi and OpenCode 2.0.8. Override the binary with
+Requires Linux, Python 3, chezmoi and an audited OpenCode release. Override the binary with
 OPENCODE_TEST_BINARY and temp parent with TMPDIR. Evidence is retained in a
 private directory; disposable HOME/config/state and child processes are removed.
 """
@@ -28,6 +28,9 @@ import termios
 import threading
 import time
 import urllib.request
+
+# Keep in step with the peerDependencies range and SECURITY.md audits.
+AUDITED = ("2.0.8", "2.0.19")
 
 
 def stop_process(process):
@@ -78,7 +81,8 @@ def main(resources):
     version = subprocess.check_output(
         [binary, "--version"], env=env, cwd=root, text=True
     ).strip()
-    assert version in ("2.0.8", "opencode v2.0.8"), version
+    version = version.removeprefix("opencode v")
+    assert version in AUDITED, f"OpenCode {version} is not an audited release {AUDITED}"
     (root / "chezmoi.toml").write_text("")
     args = [
         chezmoi,
@@ -168,7 +172,7 @@ def main(resources):
     (project / "opencode.json").write_text(
         json.dumps(
             {
-                # 2.0.8 exposes its native patch tool only for GPT-style IDs.
+                # OpenCode exposes its native patch tool only for GPT-style IDs.
                 "model": "fixture/gpt-5-fixture",
                 "enabled_providers": ["fixture"],
                 "providers": {
@@ -296,7 +300,7 @@ export default { id: "fixture.guard-observer", setup(ctx) {
             value = json.loads(raw) if raw else None
             return value.get("data", value) if isinstance(value, dict) else value
 
-    assert request("/api/info")["version"] == "2.0.8"
+    assert request("/api/info")["version"] == version
     (evidence / "location.json").write_text(json.dumps(request("/api/location")))
     for _ in range(100):
         plugins = request("/api/plugin")

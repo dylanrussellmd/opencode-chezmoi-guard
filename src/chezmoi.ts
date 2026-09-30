@@ -1,223 +1,209 @@
 /**
- * chezmoi CLI wrapper + source resolution + classification.
+ * chezmoi CLI wrapper, managed-path inventory and source classification.
  *
- * All chezmoi subprocess calls go through `chezmoi()` — no shell, argv
- * array only (no injection, C2). A short TTL cache avoids re-running
- * `chezmoi managed` for the same target within a session, while still
- * picking up state changes mid-session (M3).
+ * Every subprocess goes through `run()`: argv only (no shell), `--no-tty`,
+ * stdin closed, bounded time and output. Mutations use `managedSources()`,
+ * a fresh inventory that fails closed. Read advisories use `cachedSources()`,
+ * a short-lived copy that fails open.
  */
 
-import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve as pathResolve } from "node:path";
+import { type ExecFileException, execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { canonical, pathKey } from "./paths.js";
 import type { ResolveResult, SourceKind } from "./types.js";
 
-// ─── Prefix patterns ────────────────────────────────────────────────────────
-// All chezmoi kind-prefixes (run_, modify_, symlink_, encrypted_) are
-// *filename* attributes — they apply to the entry itself, never to its
-// descendants. `exact_` is a *directory* attribute (prunes target entries
-// absent from source); it has no kind here, and directories are excluded
-// upstream by `chezmoi managed --include=files,symlinks` regardless.
-//
-// classifyKind() therefore tests prefixes against the source path's BASENAME
-// only. A prior version tested `/(?:^|\/)prefix_/` against the whole path,
-// which matched any ancestor directory named `prefix_*` (e.g. a file at
-// `exact_dot_agents/.../default.json`, or `encrypted_dot_ssh/config`) and
-// misclassified normal files as exact/encrypted/etc., silently skipping or
-// blocking their edits. Anchoring to `^` on the basename is unambiguous:
-// chezmoi prefixes always sit at the start of the filename.
-//
-// Order still matters: a single source filename can carry several prefixes
-// (e.g. encrypted_private_dot_x.tmpl), so the most edit-restrictive
-// classification must win. classifyKind() checks encrypted before template
-// before others.
+/** A prompting template, pinentry or password manager must not hang the host. */
+export const TIMEOUT_MS = 15_000;
+/** Inventories grow with the source tree; the Node default of 1 MiB is too small. */
+export const MAX_BUFFER = 64 * 1024 * 1024;
+const CACHE_TTL_MS = 30_000;
 
-export const PREFIX_RE = {
-  run: /^run_/,
-  modify: /^modify_/,
-  symlink: /^symlink_/,
-  encrypted: /^encrypted_/,
-} as const;
+export type RunResult = { ok: true; stdout: string } | { ok: false; reason: string };
+export type Inventory = ReadonlyMap<string, ResolveResult>;
+
+function failureReason(error: ExecFileException, stderr: string): string {
+  if (error.code === "ENOENT") return "chezmoi not found on PATH";
+  if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+    return `output exceeded ${MAX_BUFFER / 1024 / 1024} MiB`;
+  if (error.killed) return `timed out after ${TIMEOUT_MS / 1000}s`;
+  const detail = stderr.trim().split("\n")[0]?.slice(0, 200);
+  const status = typeof error.code === "number" ? `exit status ${error.code}` : error.message;
+  return detail ? `${status}: ${detail}` : status;
+}
+
+/** Run chezmoi with an argv array; never throws. */
+export function run(args: string[]): Promise<RunResult> {
+  return new Promise((done) => {
+    const child = execFile(
+      "chezmoi",
+      ["--no-tty", ...args],
+      { encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER, killSignal: "SIGKILL" },
+      (error, stdout, stderr) => {
+        done(
+          error
+            ? { ok: false, reason: failureReason(error, String(stderr ?? "")) }
+            : { ok: true, stdout: String(stdout).trim() },
+        );
+      },
+    );
+    child?.stdin?.end();
+  });
+}
+
+// ─── Classification ─────────────────────────────────────────────────────────
+// chezmoi attributes are filename prefixes, so only the basename is parsed:
+// an ancestor directory such as `encrypted_dot_ssh/` or `exact_dot_config/`
+// says nothing about its descendants. Prefixes follow chezmoi's fixed order
+// per target type (source-state attribute table); `dot_`, `literal_` or any
+// other text ends parsing. The most edit-restrictive kind wins: encrypted,
+// run, modify, symlink, template, normal.
+
+const FILE_ATTRIBUTES = ["encrypted_", "private_", "readonly_", "empty_", "executable_"];
+const TYPES: readonly [string, readonly string[]][] = [
+  ["create_", FILE_ATTRIBUTES],
+  ["modify_", ["encrypted_", "private_", "readonly_", "executable_"]],
+  ["remove_", []],
+  ["run_", ["once_", "onchange_", "before_", "after_"]],
+  ["symlink_", []],
+];
 
 export const ENCRYPTED_SUFFIX_RE = /\.(age|asc)$/;
 
-const CACHE_TTL_MS = 30 * 1000; // short TTL: chezmoi state can change mid-session (M3)
-
-// ─── State ──────────────────────────────────────────────────────────────────
-
-const DEBUG = process.env.CHEZMOI_GUARD_DEBUG === "1";
-let chezmoiAvailable: boolean | null = null; // null = unchecked, true/false after first probe
-const cache = new Map<string, { result: ResolveResult | null; checkedAt: number }>();
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Debug-only stderr logger. Enable with CHEZMOI_GUARD_DEBUG=1. */
-export function _log(msg: string): void {
-  if (DEBUG) console.warn(`[chezmoi-guard] ${msg}`);
-}
-
-/**
- * Run the chezmoi CLI with an argv array (no shell → no injection, C2).
- * Returns trimmed stdout, or null on any failure (non-zero exit, missing
- * binary). On ENOENT the binary is remembered as missing so subsequent
- * calls short-circuit for the rest of the session.
- * @param args argv passed to `chezmoi`
- */
-export function chezmoi(args: string[]): string | null {
-  try {
-    const out = execFileSync("chezmoi", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    chezmoiAvailable = true; // mark availability on first successful call (L3)
-    return out.trim();
-  } catch (err) {
-    // ENOENT = binary not on PATH → remember and stop trying this session.
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
-      chezmoiAvailable = false;
-    }
-    return null;
+function attributes(base: string): Set<string> {
+  const [type, following] = TYPES.find(([prefix]) => base.startsWith(prefix)) ?? [
+    "",
+    FILE_ATTRIBUTES,
+  ];
+  const found = new Set<string>(type ? [type] : []);
+  let rest = base.slice(type.length);
+  for (const prefix of following) {
+    if (!rest.startsWith(prefix)) continue;
+    found.add(prefix);
+    rest = rest.slice(prefix.length);
   }
+  return found;
 }
 
-/** Cheap one-time availability gate so we skip work when chezmoi isn't installed. */
-export function chezmoiInstalled(): boolean {
-  if (chezmoiAvailable !== null) return chezmoiAvailable;
-  // A lightweight call that also seeds chezmoiAvailable via chezmoi().
-  chezmoi(["--version"]);
-  return chezmoiAvailable === true;
-}
-
-/** Mutations require a fresh, validated inventory; failures are never unmanaged. */
-export function managedSources(): Map<string, ResolveResult> {
-  const output = chezmoi([
-    "managed",
-    "--include=files,symlinks",
-    "--path-style=all",
-    "--format=json",
-  ]);
-  if (output === null) {
-    throw new Error(
-      "[chezmoi-guard] Cannot verify managed paths: chezmoi lookup failed. Mutation blocked; repair chezmoi configuration or availability and retry.",
-    );
-  }
-  try {
-    const inventory: unknown = JSON.parse(output);
-    if (!inventory || typeof inventory !== "object" || Array.isArray(inventory))
-      throw new Error("invalid inventory");
-    const sources = new Map<string, ResolveResult>();
-    for (const entry of Object.values(inventory)) {
-      if (
-        !entry ||
-        typeof entry !== "object" ||
-        typeof entry.absolute !== "string" ||
-        !isAbsolute(entry.absolute) ||
-        typeof entry.sourceAbsolute !== "string" ||
-        !isAbsolute(entry.sourceAbsolute)
-      ) {
-        throw new Error("invalid inventory entry");
-      }
-      sources.set(pathResolve(entry.absolute), {
-        sourcePath: entry.sourceAbsolute,
-        kind: classifyKind(entry.sourceAbsolute),
-        checkedAt: Date.now(),
-      });
-    }
-    return sources;
-  } catch {
-    throw new Error(
-      "[chezmoi-guard] Cannot verify managed paths: invalid chezmoi inventory. Mutation blocked.",
-    );
-  }
-}
-
-/**
- * Classify a source path into an edit-handling kind.
- *
- * Tests prefixes against the path's BASENAME only — chezmoi kind-prefixes
- * are filename attributes, so an ancestor directory named `run_*` /
- * `encrypted_*` / etc. must not influence a descendant file's kind.
- *
- * Encrypted is checked first (most restrictive — cannot edit ciphertext at
- * all). Then script/structural prefixes, since modify_/run_ may carry .tmpl.
- * Template (.tmpl suffix) is checked last.
- */
 export function classifyKind(sourcePath: string): SourceKind {
   const base = basename(sourcePath);
-  if (PREFIX_RE.encrypted.test(base) || ENCRYPTED_SUFFIX_RE.test(base)) {
-    return "encrypted";
-  }
-  if (PREFIX_RE.run.test(base)) return "run";
-  if (PREFIX_RE.modify.test(base)) return "modify";
-  if (PREFIX_RE.symlink.test(base)) return "symlink";
-  if (base.endsWith(".tmpl")) return "template";
+  const found = attributes(base);
+  if (found.has("encrypted_") || ENCRYPTED_SUFFIX_RE.test(base)) return "encrypted";
+  if (found.has("run_")) return "run";
+  if (found.has("modify_")) return "modify";
+  if (found.has("symlink_")) return "symlink";
+  // A `.literal` suffix stops suffix parsing, so `x.tmpl.literal` is not a template.
+  if (!base.endsWith(".literal") && base.endsWith(".tmpl")) return "template";
   return "normal";
 }
 
-/**
- * Resolve a target path to its chezmoi source path with caching.
- * Restricts to files+symlinks (H2) so directories/scripts never misclassify.
- * @returns the source path + kind, or null if the target is not managed.
- */
-export function resolveSource(targetPath: string): ResolveResult | null {
-  if (!chezmoiInstalled()) return null;
+// ─── Inventory ──────────────────────────────────────────────────────────────
 
-  // `managed --include=files,symlinks DIR` still lists DIR's descendants.
-  try {
-    if (lstatSync(targetPath).isDirectory()) return null;
-  } catch {
-    // A managed target may not have been created yet (patch Add/write).
-  }
+const INVENTORY_ARGS = ["managed", "--include=files,symlinks", "--path-style=all", "--format=json"];
 
-  const now = Date.now();
-  const cached = cache.get(targetPath);
-  if (cached && now - cached.checkedAt < CACHE_TTL_MS) {
-    return cached.result;
-  }
-
-  const sourcePath = chezmoi([
-    "managed",
-    "--include=files,symlinks",
-    "--path-style=source-absolute",
-    targetPath,
-  ]);
-
-  if (!sourcePath) {
-    // Cache negative result; the TTL still applies on read.
-    cache.set(targetPath, { result: null, checkedAt: now });
-    return null;
-  }
-
-  // A single managed file/symlink target yields exactly one line; guard anyway.
-  const lines = sourcePath.split("\n");
-  if (lines.length !== 1) return null;
-  const firstLine = lines[0]?.trim() ?? "";
-  if (!firstLine) {
-    cache.set(targetPath, { result: null, checkedAt: now });
-    return null;
-  }
-  const result: ResolveResult = {
-    sourcePath: firstLine,
-    kind: classifyKind(firstLine),
-    checkedAt: now,
-  };
-  cache.set(targetPath, { result, checkedAt: now });
-  return result;
+function invalid(): Error {
+  return new Error(
+    "[chezmoi-guard] Cannot verify managed paths: invalid chezmoi inventory. Mutation blocked.",
+  );
 }
 
 /**
- * For symlink sources, read the source file to get the link target,
- * resolving relative targets against the symlink's own directory (H4).
- * @returns the absolute path the symlink points to, or null on read failure.
+ * Key each entry by its reported path and by the path with its *parent*
+ * resolved, so a symlinked destination directory (e.g. /home → /var/home)
+ * still matches. The final component is deliberately not followed: a managed
+ * symlink's referent is a separate, possibly unmanaged file.
  */
-export function readSymlinkTarget(sourcePath: string, targetPath: string): string | null {
+function parseInventory(output: string): Map<string, ResolveResult> {
+  let inventory: unknown;
   try {
-    const linkContent = sourcePath.endsWith(".tmpl")
-      ? chezmoi(["execute-template", "--file", "--", sourcePath])
-      : readFileSync(sourcePath, "utf8").trim();
-    if (!linkContent) return null;
-    return pathResolve(dirname(targetPath), linkContent);
+    inventory = JSON.parse(output);
   } catch {
+    throw invalid();
+  }
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) throw invalid();
+  const sources = new Map<string, ResolveResult>();
+  for (const entry of Object.values(inventory)) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof entry.absolute !== "string" ||
+      !isAbsolute(entry.absolute) ||
+      typeof entry.sourceAbsolute !== "string" ||
+      !isAbsolute(entry.sourceAbsolute)
+    ) {
+      throw invalid();
+    }
+    const info = { sourcePath: entry.sourceAbsolute, kind: classifyKind(entry.sourceAbsolute) };
+    const target = resolve(entry.absolute);
+    sources.set(pathKey(target), info);
+    sources.set(pathKey(resolve(canonical(dirname(target)), basename(target))), info);
+  }
+  return sources;
+}
+
+let cached: { sources: Inventory | null; at: number } | undefined;
+
+/** Mutations require a fresh, validated inventory; failures are never unmanaged. */
+export async function managedSources(): Promise<Inventory> {
+  const result = await run(INVENTORY_ARGS);
+  if (!result.ok) {
+    throw new Error(
+      `[chezmoi-guard] Cannot verify managed paths: chezmoi lookup failed (${result.reason}). Mutation blocked; repair chezmoi configuration or availability and retry.`,
+    );
+  }
+  const sources = parseInventory(result.stdout);
+  cached = { sources, at: Date.now() };
+  return sources;
+}
+
+/** Best-effort inventory for read advisories; null when chezmoi is unusable. */
+export async function cachedSources(): Promise<Inventory | null> {
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.sources;
+  try {
+    return await managedSources();
+  } catch {
+    cached = { sources: null, at: Date.now() };
     return null;
   }
+}
+
+/** Test hook: forget the advisory cache. */
+export function resetCache(): void {
+  cached = undefined;
+}
+
+/**
+ * Find a path in the inventory as given, with its parent resolved, and fully
+ * resolved (an alias or symlinked ancestor pointing at a managed file).
+ */
+export function lookup(sources: Inventory, path: string): ResolveResult | undefined {
+  return (
+    sources.get(pathKey(path)) ??
+    sources.get(pathKey(resolve(canonical(dirname(path)), basename(path)))) ??
+    sources.get(pathKey(canonical(path)))
+  );
+}
+
+/**
+ * For symlink sources, read (or render) the link definition and resolve a
+ * relative referent against the symlink's own directory.
+ * @returns the absolute referent, or null when it cannot be determined.
+ */
+export async function readSymlinkTarget(
+  sourcePath: string,
+  targetPath: string,
+): Promise<string | null> {
+  let linkContent: string;
+  if (sourcePath.endsWith(".tmpl")) {
+    const result = await run(["execute-template", "--file", "--", sourcePath]);
+    if (!result.ok) return null;
+    linkContent = result.stdout;
+  } else {
+    try {
+      linkContent = (await readFile(sourcePath, "utf8")).trim();
+    } catch {
+      return null;
+    }
+  }
+  return linkContent ? resolve(dirname(targetPath), linkContent) : null;
 }

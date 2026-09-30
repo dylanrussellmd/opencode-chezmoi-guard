@@ -5,41 +5,29 @@ export interface PatchHeader {
   path: string;
 }
 
-const HEADER = /^(\*\*\* (Add File|Update File|Delete File|Move to): )(.+)$/;
+const HEADERS = [
+  ["*** Add File: ", "Add"],
+  ["*** Update File: ", "Update"],
+  ["*** Delete File: ", "Delete"],
+  ["*** Move to: ", "Move"],
+] as const;
 
+/**
+ * Mirrors `@opencode/util/patch` parse() in 2.0.8 and 2.0.19: each line is
+ * trimmed, matched with a literal `startsWith`, and the remainder trimmed.
+ * The host only accepts some headers in some positions; accepting every
+ * header on every line is a superset, so no header the host acts on is missed.
+ */
 export function patchHeaders(text: string): PatchHeader[] {
   const headers: PatchHeader[] = [];
   for (const [line, content] of text.split("\n").entries()) {
-    // OpenCode 2.0.8 trims outer whitespace on operation headers. Conservatively
-    // recognize those headers too; ignoring them would bypass the guard.
-    const match = HEADER.exec(content.trim());
-    if (!match) continue;
-    headers.push({
-      line,
-      operation: match[2]?.split(" ")[0] as PatchHeader["operation"],
-      path: (match[3] ?? "").trim(),
-    });
+    const header = content.trim();
+    for (const [prefix, operation] of HEADERS) {
+      if (!header.startsWith(prefix)) continue;
+      const path = header.slice(prefix.length).trim();
+      if (path) headers.push({ line, operation, path });
+      break;
+    }
   }
   return headers;
-}
-
-export function extractPathsFromPatch(text: string): string[] {
-  return [...new Set(patchHeaders(text).map((header) => header.path))];
-}
-
-export function rewritePatchHeaders(
-  text: string,
-  replacements: ReadonlyMap<number, string>,
-): string {
-  return text
-    .split("\n")
-    .map((line, index) => {
-      const path = replacements.get(index);
-      if (path === undefined) return line;
-      const cr = line.endsWith("\r") ? "\r" : "";
-      return (
-        line.replace(/\r$/, "").replace(HEADER, (_match, prefix: string) => `${prefix}${path}`) + cr
-      );
-    })
-    .join("\n");
 }

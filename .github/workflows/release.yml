@@ -45,6 +45,19 @@ jobs:
       - name: install (frozen)
         run: npm ci
 
+      # Pinned, checksum-verified chezmoi for the real-chezmoi integration smoke.
+      - name: install chezmoi
+        env:
+          CHEZMOI_VERSION: 2.73.0
+          CHEZMOI_SHA256: b597729b687af4488a848240134cb633de8ca0f04e0d26d48f400ee2ac338ffa
+        run: |
+          archive="chezmoi_${CHEZMOI_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://github.com/twpayne/chezmoi/releases/download/v${CHEZMOI_VERSION}/$archive"
+          echo "${CHEZMOI_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" chezmoi
+          sudo install "$RUNNER_TEMP/chezmoi" /usr/local/bin/chezmoi
+          chezmoi --version
+
       # Re-run the full gate so a tag can never ship something main wouldn't.
       - name: typecheck
         run: npm run typecheck
@@ -54,6 +67,8 @@ jobs:
         run: npm run build
       - name: test
         run: npm test
+      - name: integration (real chezmoi, mocked host)
+        run: node scripts/integration-smoke.mjs
 
       # Guard: the tag (vX.Y.Z) must match package.json "version" exactly, so
       # `git tag v0.1.1` on a package.json still at 0.1.0 fails loudly instead

@@ -1,48 +1,54 @@
-/** Native OpenCode 2.0.8 guard: no redirection or subprocess writes. */
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+/** Native OpenCode 2 guard: no redirection or subprocess writes. */
 import type { Plugin } from "@opencode/plugin";
 import type { Result } from "@opencode/plugin/promise/tool";
-import { managedSources, readSymlinkTarget, resolveSource } from "./chezmoi.js";
+import {
+  type Inventory,
+  cachedSources,
+  lookup,
+  managedSources,
+  readSymlinkTarget,
+} from "./chezmoi.js";
 import { buildEncryptedGuidance, buildReadGuidance } from "./guidance.js";
 import { patchHeaders } from "./patch.js";
-import type { ResolveResult } from "./types.js";
+import { expandPath } from "./paths.js";
 
+// `apply_patch` is not a 2.0.19 tool; it is kept for hosts or plugins that
+// register a compatible patch tool under that name.
 const MUTATIONS = new Set(["edit", "write", "patch", "apply_patch"]);
+const PATCH_TOOLS = new Set(["patch", "apply_patch"]);
 
-// Resolve existing ancestors too: a new file can sit below a symlinked directory.
-function canonical(path: string, seen = new Set<string>()): string {
-  if (seen.has(path) || seen.size >= 64)
-    throw new Error("[chezmoi-guard] Cannot verify symlink chain; mutation blocked.");
-  seen.add(path);
-  try {
-    return realpathSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    // realpath fails on dangling symlinks; writing them can still create the
-    // managed referent, so inspect the link definition before parent fallback.
-    try {
-      if (lstatSync(path).isSymbolicLink()) {
-        return canonical(resolve(dirname(path), readlinkSync(path)), seen);
-      }
-    } catch (linkError) {
-      if ((linkError as NodeJS.ErrnoException).code !== "ENOENT") throw linkError;
-    }
-    const parent = dirname(path);
-    return parent === path ? path : resolve(canonical(parent, seen), basename(path));
+/**
+ * Extract every target path from a mutation's input. An input the guard
+ * cannot interpret (schema drift, a new field name, an unparsed patch) is
+ * refused rather than passed through: the host would reject a truly invalid
+ * input anyway, but a valid one the guard misread would bypass it.
+ */
+function mutationPaths(tool: string, input: unknown): string[] {
+  const fields = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  const paths = PATCH_TOOLS.has(tool)
+    ? typeof fields.patchText === "string"
+      ? patchHeaders(fields.patchText).map((header) => header.path)
+      : []
+    : [fields.path, fields.filePath].filter(
+        (path): path is string => typeof path === "string" && !!path,
+      );
+  if (!paths.length) {
+    throw new Error(
+      `[chezmoi-guard] Cannot determine the target path of this ${tool} call; mutation blocked. Use the tool's documented input (${PATCH_TOOLS.has(tool) ? "patchText with *** Add/Update/Delete File headers" : "path"}).`,
+    );
   }
+  return paths;
 }
 
-function assertUnmanaged(path: string, sources: ReadonlyMap<string, ResolveResult>): void {
-  const info = sources.get(path) ?? sources.get(canonical(path));
+function assertUnmanaged(path: string, sources: Inventory): void {
+  const info = lookup(sources, path);
   if (!info) return;
   if (info.kind === "encrypted") throw new Error(buildEncryptedGuidance(path, info.sourcePath));
   throw new Error(
     [
       `[chezmoi-guard] Managed target mutation blocked: ${path}`,
       `Source (${info.kind}): ${info.sourcePath}`,
-      "OpenCode 2.0.8 cannot authorize both source and target writes from this hook.",
+      "OpenCode's plugin API cannot authorize both source and target writes from this hook.",
       "Automatic redirection and apply are disabled. Read the source and explicitly edit it through normal permission-checked tools.",
       "For symlinks, inspect the link definition and explicitly edit its referent.",
       "Review the changes, then have the user synchronize this target with chezmoi. No source or target has been changed by this operation.",
@@ -50,14 +56,18 @@ function assertUnmanaged(path: string, sources: ReadonlyMap<string, ResolveResul
   );
 }
 
-function readGuidance(target: string, seen = new Set<string>()): string {
+async function readGuidance(
+  sources: Inventory,
+  target: string,
+  seen = new Set<string>(),
+): Promise<string> {
   if (seen.has(target) || seen.size >= 32) return "";
   seen.add(target);
-  const info = resolveSource(target);
+  const info = lookup(sources, target);
   if (!info) return "";
   if (info.kind === "symlink") {
-    const actual = readSymlinkTarget(info.sourcePath, target);
-    return actual ? readGuidance(actual, seen) : "";
+    const actual = await readSymlinkTarget(info.sourcePath, target);
+    return actual ? readGuidance(sources, actual, seen) : "";
   }
   if (info.kind === "template" || info.kind === "modify" || info.kind === "encrypted") {
     return buildReadGuidance(target, info.sourcePath, info.kind);
@@ -82,28 +92,14 @@ export const ChezmoiGuardPlugin: Plugin.Plugin = {
     const absolute = async (
       path: string,
       sessionID: Parameters<typeof ctx.session.get>[0]["sessionID"],
-    ) => {
-      if (path === "~") return homedir();
-      if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
-      if (isAbsolute(path)) return resolve(path);
-      return resolve((await ctx.session.get({ sessionID })).location.directory, path);
-    };
+    ) => expandPath(path, (await ctx.session.get({ sessionID })).location.directory);
 
     await ctx.tool.hook("execute.before", async (event) => {
-      if (!MUTATIONS.has(event.tool) || !event.input || typeof event.input !== "object") return;
-      const input = event.input as Record<string, unknown>;
-      const paths =
-        event.tool === "patch" || event.tool === "apply_patch"
-          ? typeof input.patchText === "string"
-            ? patchHeaders(input.patchText).map((header) => header.path)
-            : []
-          : [typeof input.path === "string" ? input.path : input.filePath].filter(
-              (path): path is string => typeof path === "string" && !!path,
-            );
-      if (!paths.length) return;
+      if (!MUTATIONS.has(event.tool)) return;
+      const paths = mutationPaths(event.tool, event.input);
       // Fresh successful inventory is required for mutations. No availability
       // shortcut, cached negative result, or swallowed CLI/JSON failure.
-      const sources = managedSources();
+      const sources = await managedSources();
       for (const path of paths) assertUnmanaged(await absolute(path, event.sessionID), sources);
       // Original input remains intact, so the host checks original resources.
     });
@@ -112,8 +108,15 @@ export const ChezmoiGuardPlugin: Plugin.Plugin = {
       if (event.status !== "completed" || event.tool !== "read") return;
       const input = event.input as { path?: unknown; filePath?: unknown } | null;
       const path = input?.path ?? input?.filePath;
-      if (typeof path === "string" && path) {
-        event.result = prepend(event.result, readGuidance(await absolute(path, event.sessionID)));
+      if (typeof path !== "string" || !path) return;
+      // Advisories are best-effort: any failure leaves the read result as is.
+      try {
+        const sources = await cachedSources();
+        if (!sources) return;
+        const guidance = await readGuidance(sources, await absolute(path, event.sessionID));
+        event.result = prepend(event.result, guidance);
+      } catch {
+        // Unresolvable path or symlink loop: no advisory.
       }
     });
   },

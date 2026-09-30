@@ -3,95 +3,138 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Mock-based unit tests for the chezmoi CLI wrappers.
  *
- * The wrappers (`chezmoi`, `chezmoiInstalled`, `resolveSource`,
- * `readSymlinkTarget`) hold module-level state (`chezmoiAvailable`, the
- * resolve cache). Each test resets modules + re-mocks `execFileSync` /
- * `readFileSync` so the state starts fresh and the spy can be reconfigured
- * per case.
+ * `run()` goes through `execFile`; the inventory canonicalises parents with
+ * `realpathSync`; symlink definitions use `readFile`. Each test resets modules
+ * so the advisory cache starts empty.
  */
 
-// Stash the mock impls so each test can set them before importing.
-let execMock: (cmd: string, args: string[]) => string;
-let readFileSyncMock: (path: string, enc: string) => string;
+type Exec = (cmd: string, args: string[], options: Record<string, unknown>) => string;
+let execMock: Exec;
+let readFileMock: (path: string) => string;
+const aliases = new Map<string, string>();
+const stdinEnd = vi.fn();
+
+function failure(fields: Record<string, unknown>, stderr = ""): Error {
+  return Object.assign(new Error(String(fields.message ?? "failed")), fields, { stderr });
+}
 
 beforeEach(() => {
   vi.resetModules();
+  aliases.clear();
+  stdinEnd.mockReset();
   vi.doMock("node:child_process", () => ({
-    execFileSync: (cmd: string, args: string[]) => execMock(cmd, args),
+    execFile: (
+      cmd: string,
+      args: string[],
+      options: Record<string, unknown>,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      queueMicrotask(() => {
+        try {
+          callback(null, execMock(cmd, args, options), "");
+        } catch (error) {
+          callback(error as Error, "", (error as { stderr?: string }).stderr ?? "");
+        }
+      });
+      return { stdin: { end: stdinEnd } };
+    },
   }));
   vi.doMock("node:fs", () => ({
-    lstatSync: () => ({ isDirectory: () => false }),
-    readFileSync: (path: string, enc: string) => readFileSyncMock(path, enc),
+    realpathSync: (path: string) => aliases.get(path) ?? path,
+    lstatSync: () => ({ isSymbolicLink: () => false }),
+    readlinkSync: () => "",
+  }));
+  vi.doMock("node:fs/promises", () => ({
+    readFile: async (path: string) => readFileMock(path),
   }));
 });
 
 afterEach(() => {
   vi.doUnmock("node:child_process");
   vi.doUnmock("node:fs");
+  vi.doUnmock("node:fs/promises");
   vi.restoreAllMocks();
 });
 
-/** Dynamic import so the doMock above takes effect before module init. */
 async function load() {
   return await import("../../src/chezmoi.js");
 }
 
-describe("chezmoi() subprocess wrapper", () => {
-  it("returns trimmed stdout on success and marks the binary available", async () => {
-    execMock = () => "  chezmoi version 2.58.0  \n";
-    const m = await load();
-    expect(m.chezmoi(["--version"])).toBe("chezmoi version 2.58.0");
-    expect(m.chezmoiInstalled()).toBe(true);
-  });
+const inventory = (entries: Record<string, [string, string]>) =>
+  JSON.stringify(
+    Object.fromEntries(
+      Object.entries(entries).map(([key, [absolute, sourceAbsolute]]) => [
+        key,
+        { absolute, sourceAbsolute },
+      ]),
+    ),
+  );
 
-  it("returns null and remembers ENOENT (binary missing) for the session", async () => {
-    execMock = () => {
-      const e = new Error("spawn ENOENT");
-      (e as Error & { code: string }).code = "ENOENT";
-      throw e;
+describe("run() subprocess wrapper", () => {
+  it("passes --no-tty, bounds time and output, and closes stdin", async () => {
+    let seen: { args: string[]; options: Record<string, unknown> } | undefined;
+    execMock = (_cmd, args, options) => {
+      seen = { args, options };
+      return "  out  \n";
     };
     const m = await load();
-    expect(m.chezmoi(["--version"])).toBeNull();
-    // cached as unavailable — subsequent calls short-circuit without exec
-    expect(m.chezmoiInstalled()).toBe(false);
+    expect(await m.run(["--version"])).toEqual({ ok: true, stdout: "out" });
+    expect(seen?.args).toEqual(["--no-tty", "--version"]);
+    expect(seen?.options).toMatchObject({
+      timeout: m.TIMEOUT_MS,
+      maxBuffer: m.MAX_BUFFER,
+      killSignal: "SIGKILL",
+    });
+    expect(m.MAX_BUFFER).toBeGreaterThanOrEqual(64 * 1024 * 1024);
+    expect(stdinEnd).toHaveBeenCalledOnce();
   });
 
-  it("returns null on a non-ENOENT failure (e.g. nonzero exit) without marking the binary missing", async () => {
-    let call = 0;
-    execMock = () => {
-      call++;
-      if (call === 1) {
-        const e = new Error("exit code 1");
-        (e as Error & { code: string }).code = "1";
-        throw e;
-      }
-      return "chezmoi version 2.58.0";
-    };
-    const m = await load();
-    expect(m.chezmoi(["managed", "--path-style=source-absolute", "/x"])).toBeNull();
-    // a later successful call still works (binary not blacklisted)
-    expect(m.chezmoi(["--version"])).toBe("chezmoi version 2.58.0");
-    expect(m.chezmoiInstalled()).toBe(true);
-  });
+  for (const [name, error, stderr, reason] of [
+    ["missing binary", { code: "ENOENT" }, "", "chezmoi not found on PATH"],
+    [
+      "output overflow",
+      { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+      "",
+      "output exceeded 64 MiB",
+    ],
+    ["timeout", { killed: true, signal: "SIGKILL" }, "", "timed out after 15s"],
+    [
+      "exit status with stderr",
+      { code: 1 },
+      "chezmoi: bad config\nmore",
+      "exit status 1: chezmoi: bad config",
+    ],
+    ["exit status without stderr", { code: 2 }, "", "exit status 2"],
+    ["other error", { message: "spawn EACCES" }, "", "spawn EACCES"],
+  ] as const) {
+    it(`reports ${name} without throwing`, async () => {
+      execMock = () => {
+        throw failure(error, stderr);
+      };
+      const m = await load();
+      expect(await m.run(["managed"])).toEqual({ ok: false, reason });
+    });
+  }
 });
 
 describe("mutation inventory (fail closed)", () => {
   it("distinguishes a successful empty inventory from subprocess failure", async () => {
     execMock = () => "{}";
     const m = await load();
-    expect(m.managedSources().size).toBe(0);
+    expect((await m.managedSources()).size).toBe(0);
     execMock = () => {
-      throw new Error("configuration/decryption failure");
+      throw failure({ code: 1 }, "configuration/decryption failure");
     };
-    expect(() => m.managedSources()).toThrow("lookup failed");
+    await expect(m.managedSources()).rejects.toThrow(
+      "lookup failed (exit status 1: configuration/decryption failure)",
+    );
   });
-  it("blocks unavailable chezmoi even after an availability probe", async () => {
+  it("names a timeout in the refusal", async () => {
     execMock = () => {
-      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      throw failure({ killed: true });
     };
     const m = await load();
-    expect(m.chezmoiInstalled()).toBe(false);
-    expect(() => m.managedSources()).toThrow("lookup failed");
+    await expect(m.managedSources()).rejects.toThrow("lookup failed (timed out after 15s)");
   });
   for (const output of [
     "",
@@ -99,18 +142,21 @@ describe("mutation inventory (fail closed)", () => {
     "null",
     "[]",
     '{"x":{}}',
+    '{"x":null}',
     '{"x":{"absolute":"relative","sourceAbsolute":"/source"}}',
+    '{"x":{"absolute":"/target","sourceAbsolute":"relative"}}',
   ]) {
     it(`rejects invalid inventory ${output}`, async () => {
       execMock = () => output;
       const m = await load();
-      expect(() => m.managedSources()).toThrow("invalid chezmoi inventory");
+      await expect(m.managedSources()).rejects.toThrow("invalid chezmoi inventory");
     });
   }
-  it("uses fresh inventory and classifies encrypted paths without negative caching", async () => {
+  it("uses a fresh inventory for every mutation and classifies entries", async () => {
     let calls = 0;
     execMock = (_cmd, args) => {
       expect(args).toEqual([
+        "--no-tty",
         "managed",
         "--include=files,symlinks",
         "--path-style=all",
@@ -118,120 +164,107 @@ describe("mutation inventory (fail closed)", () => {
       ]);
       return ++calls === 1
         ? "{}"
-        : JSON.stringify({
-            ".secret": { absolute: "/target", sourceAbsolute: "/source/encrypted_dot_secret.age" },
-          });
+        : inventory({ ".secret": ["/target", "/source/encrypted_dot_secret.age"] });
     };
     const m = await load();
-    expect(m.managedSources().get("/target")).toBeUndefined();
-    expect(m.managedSources().get("/target")?.kind).toBe("encrypted");
+    expect((await m.managedSources()).get("/target")).toBeUndefined();
+    expect((await m.managedSources()).get("/target")?.kind).toBe("encrypted");
+  });
+  it("keys entries by their parent-resolved path but never follows the final link", async () => {
+    aliases.set("/home/u", "/var/home/u");
+    aliases.set("/home/u/.link", "/home/u/dotfiles/link");
+    execMock = () =>
+      inventory({
+        ".bashrc": ["/home/u/.bashrc", "/src/dot_bashrc"],
+        ".link": ["/home/u/.link", "/src/symlink_dot_link"],
+      });
+    const m = await load();
+    const sources = await m.managedSources();
+    expect(m.lookup(sources, "/var/home/u/.bashrc")?.sourcePath).toBe("/src/dot_bashrc");
+    expect(m.lookup(sources, "/var/home/u/.link")?.kind).toBe("symlink");
+    expect(m.lookup(sources, "/home/u/dotfiles/link")).toBeUndefined();
+  });
+  it("finds a managed file through an alias of the full path", async () => {
+    aliases.set("/elsewhere/alias", "/home/u/.bashrc");
+    execMock = () => inventory({ ".bashrc": ["/home/u/.bashrc", "/src/dot_bashrc"] });
+    const m = await load();
+    expect(m.lookup(await m.managedSources(), "/elsewhere/alias")?.kind).toBe("normal");
   });
 });
 
-describe("resolveSource", () => {
-  it("returns null when chezmoi is not installed", async () => {
+describe("advisory inventory (fail open)", () => {
+  it("reuses a recent inventory, including one from a mutation", async () => {
+    let calls = 0;
     execMock = () => {
-      const e = new Error("spawn ENOENT");
-      (e as Error & { code: string }).code = "ENOENT";
-      throw e;
+      calls++;
+      return inventory({ ".x": ["/t", "/s/dot_x.tmpl"] });
     };
     const m = await load();
-    expect(m.resolveSource("/home/u/.bashrc")).toBeNull();
+    await m.managedSources();
+    expect((await m.cachedSources())?.get("/t")?.kind).toBe("template");
+    expect(calls).toBe(1);
+    m.resetCache();
+    await m.cachedSources();
+    expect(calls).toBe(2);
   });
-
-  it("resolves a managed file to its source path and classifies the kind", async () => {
-    let call = 0;
-    execMock = (_cmd, args) => {
-      call++;
-      if (args[0] === "--version") return "chezmoi version 2.58.0";
-      if (args[0] === "managed") return "/home/u/.local/share/chezmoi/dot_bashrc";
-      throw new Error(`unexpected call #${call}: ${args.join(" ")}`);
+  it("returns null on failure and caches the failure briefly", async () => {
+    let calls = 0;
+    execMock = () => {
+      calls++;
+      throw failure({ code: "ENOENT" });
     };
     const m = await load();
-    const r = m.resolveSource("/home/u/.bashrc");
-    expect(r).not.toBeNull();
-    expect(r?.sourcePath).toBe("/home/u/.local/share/chezmoi/dot_bashrc");
-    expect(r?.kind).toBe("normal");
-  });
-
-  it("classifies a .tmpl source as template", async () => {
-    execMock = (_cmd, args) =>
-      args[0] === "--version"
-        ? "chezmoi version 2.58.0"
-        : "/home/u/.local/share/chezmoi/dot_config/nvim/init.vim.tmpl";
-    const m = await load();
-    expect(m.resolveSource("/home/u/.config/nvim/init.vim")?.kind).toBe("template");
-  });
-
-  it("returns null for an unmanaged target", async () => {
-    execMock = (_cmd, args) => (args[0] === "--version" ? "chezmoi version 2.58.0" : "");
-    const m = await load();
-    expect(m.resolveSource("/home/u/.notmanaged")).toBeNull();
-  });
-
-  it("serves a cached result on the second call within the TTL", async () => {
-    let managedCalls = 0;
-    execMock = (_cmd, args) => {
-      if (args[0] === "--version") return "chezmoi version 2.58.0";
-      if (args[0] === "managed") {
-        managedCalls++;
-        return "/src/dot_bashrc";
-      }
-      throw new Error("unexpected");
-    };
-    const m = await load();
-    m.resolveSource("/home/u/.bashrc");
-    m.resolveSource("/home/u/.bashrc");
-    expect(managedCalls).toBe(1); // second call hit the cache
+    expect(await m.cachedSources()).toBeNull();
+    expect(await m.cachedSources()).toBeNull();
+    expect(calls).toBe(1);
   });
 });
 
 describe("readSymlinkTarget", () => {
   it("renders templated symlink sources before resolving relative targets", async () => {
     execMock = (_cmd, args) => {
-      expect(args).toEqual(["execute-template", "--file", "--", "/src/symlink_dot_vimrc.tmpl"]);
+      expect(args).toEqual([
+        "--no-tty",
+        "execute-template",
+        "--file",
+        "--",
+        "/src/symlink_dot_vimrc.tmpl",
+      ]);
       return "../rendered/vimrc\n";
     };
     const m = await load();
-    expect(m.readSymlinkTarget("/src/symlink_dot_vimrc.tmpl", "/home/u/.vimrc")).toBe(
+    expect(await m.readSymlinkTarget("/src/symlink_dot_vimrc.tmpl", "/home/u/.vimrc")).toBe(
       "/home/rendered/vimrc",
     );
   });
-  it("resolves a relative link target against the symlink's own directory", async () => {
-    readFileSyncMock = () => "../dotfiles/vimrc\n";
+  it("returns null when a templated definition fails to render", async () => {
+    execMock = () => {
+      throw failure({ code: 1 });
+    };
     const m = await load();
-    const actual = m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc");
-    expect(actual).toBe("/home/dotfiles/vimrc");
+    expect(await m.readSymlinkTarget("/src/symlink_dot_vimrc.tmpl", "/home/u/.vimrc")).toBeNull();
   });
-
-  it("resolves an absolute link target as-is", async () => {
-    readFileSyncMock = () => "/opt/dotfiles/vimrc";
+  it("resolves a relative link target against the symlink's own directory", async () => {
+    readFileMock = () => "../dotfiles/vimrc\n";
     const m = await load();
-    expect(m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc")).toBe(
+    expect(await m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc")).toBe(
+      "/home/dotfiles/vimrc",
+    );
+  });
+  it("resolves an absolute link target as-is", async () => {
+    readFileMock = () => "/opt/dotfiles/vimrc";
+    const m = await load();
+    expect(await m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc")).toBe(
       "/opt/dotfiles/vimrc",
     );
   });
-
-  it("returns null when the source file cannot be read", async () => {
-    readFileSyncMock = () => {
+  it("returns null when the source cannot be read or is empty", async () => {
+    const m = await load();
+    readFileMock = () => {
       throw new Error("ENOENT");
     };
-    const m = await load();
-    expect(m.readSymlinkTarget("/src/missing", "/home/u/.vimrc")).toBeNull();
-  });
-
-  it("returns null for an empty link target", async () => {
-    readFileSyncMock = () => "   \n";
-    const m = await load();
-    expect(m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc")).toBeNull();
-  });
-});
-
-describe("classifyKind", () => {
-  it("is re-exported and still routes by prefix", async () => {
-    execMock = () => "chezmoi version 2.58.0";
-    const m = await load();
-    expect(m.classifyKind("/src/dot_bashrc")).toBe("normal");
-    expect(m.classifyKind("/src/encrypted_dot_netrc.age")).toBe("encrypted");
+    expect(await m.readSymlinkTarget("/src/missing", "/home/u/.vimrc")).toBeNull();
+    readFileMock = () => "   \n";
+    expect(await m.readSymlinkTarget("/src/symlink_dot_vimrc", "/home/u/.vimrc")).toBeNull();
   });
 });

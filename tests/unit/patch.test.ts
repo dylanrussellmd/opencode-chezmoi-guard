@@ -1,26 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { extractPathsFromPatch, patchHeaders, rewritePatchHeaders } from "../../src/patch.js";
+import { patchHeaders } from "../../src/patch.js";
+
+const paths = (text: string) => patchHeaders(text).map((header) => header.path);
 
 describe("native V2 patch headers", () => {
-  it("extracts Add/Update/Delete/Move paths with spaces and deduplicates", () => {
+  it("extracts Add/Update/Delete/Move paths with spaces", () => {
     expect(
-      extractPathsFromPatch(
-        "*** Add File: a b\n*** Update File: c\n*** Move to: d\n*** Delete File: e\n*** Update File: c",
-      ),
-    ).toEqual(["a b", "c", "d", "e"]);
+      patchHeaders("*** Add File: a b\n*** Update File: c\n*** Move to: d\n*** Delete File: e"),
+    ).toEqual([
+      { line: 0, operation: "Add", path: "a b" },
+      { line: 1, operation: "Update", path: "c" },
+      { line: 2, operation: "Move", path: "d" },
+      { line: 3, operation: "Delete", path: "e" },
+    ]);
   });
   it("ignores diff content, obsolete Create and unified headers", () => {
     expect(
-      extractPathsFromPatch(
-        "+*** Update File: x\n *** Delete File: y\n*** Create File: z\n--- a/file\n+++ b/file",
-      ),
+      paths("+*** Update File: x\n *** Delete File: y\n*** Create File: z\n--- a/file\n+++ b/file"),
     ).toEqual(["y"]);
   });
-  it("preserves content, CRLF and literal dollars in replacement paths", () => {
-    const text = "*** Update File: old\r\n@@\r\n-old\r\n+old\r\n";
-    expect(patchHeaders(text)).toEqual([{ line: 0, operation: "Update", path: "old" }]);
-    expect(rewritePatchHeaders(text, new Map([[0, "/source/$&$1"]]))).toBe(
-      "*** Update File: /source/$&$1\r\n@@\r\n-old\r\n+old\r\n",
+  it("matches the host's trim rules: CRLF, padding, and Unicode whitespace", () => {
+    expect(paths("*** Update File: old\r\n@@\r\n-old\r\n+old\r\n")).toEqual(["old"]);
+    expect(paths("\t *** Add File:   /padded  \u00a0")).toEqual(["/padded"]);
+    expect(paths("*** Add File: /a\u2028")).toEqual(["/a"]);
+  });
+  it("skips headers the host rejects: empty paths and missing separator space", () => {
+    expect(paths("*** Add File: \n*** Move to:\n*** Delete File:/x\n*** Update File:\t/y")).toEqual(
+      [],
     );
   });
 });

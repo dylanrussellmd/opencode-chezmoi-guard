@@ -9,13 +9,15 @@ const mock = vi.hoisted(() => ({
   aliases: new Map<string, string>(),
   links: new Map<string, string>(),
   inventory: vi.fn(),
-  chezmoi: vi.fn(),
+  cached: vi.fn(),
+  run: vi.fn(),
 }));
-vi.mock("../../src/chezmoi.js", () => ({
+vi.mock("../../src/chezmoi.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/chezmoi.js")>()),
   managedSources: mock.inventory,
-  resolveSource: (path: string) => mock.sources.get(path) ?? null,
-  readSymlinkTarget: (source: string) => mock.links.get(source) ?? null,
-  chezmoi: mock.chezmoi,
+  cachedSources: mock.cached,
+  readSymlinkTarget: async (source: string) => mock.links.get(source) ?? null,
+  run: mock.run,
 }));
 vi.mock("node:fs", () => ({ realpathSync: (path: string) => mock.aliases.get(path) ?? path }));
 
@@ -61,14 +63,15 @@ async function harness() {
   };
 }
 function managed(kind: ResolveResult["kind"] = "normal", path = "/target") {
-  mock.sources.set(path, { sourcePath: `/source/${kind}`, kind, checkedAt: 0 });
+  mock.sources.set(path, { sourcePath: `/source/${kind}`, kind });
 }
 beforeEach(() => {
   mock.sources.clear();
   mock.aliases.clear();
   mock.links.clear();
-  mock.inventory.mockReset().mockImplementation(() => new Map(mock.sources));
-  mock.chezmoi.mockReset();
+  mock.inventory.mockReset().mockImplementation(async () => new Map(mock.sources));
+  mock.cached.mockReset().mockImplementation(async () => new Map(mock.sources));
+  mock.run.mockReset();
 });
 
 describe("conservative V2 authorization boundary", () => {
@@ -109,7 +112,7 @@ describe("conservative V2 authorization boundary", () => {
           kind === "encrypted" ? "EDIT BLOCKED" : "Managed target mutation blocked",
         );
         expect(e.input).toEqual(original);
-        expect(mock.chezmoi).not.toHaveBeenCalled();
+        expect(mock.run).not.toHaveBeenCalled();
       });
     }
   }
@@ -148,7 +151,7 @@ describe("conservative V2 authorization boundary", () => {
     expect(execute).not.toHaveBeenCalled();
     await run(event("edit", { path: "/source/normal" }));
     expect(execute).toHaveBeenCalledExactlyOnceWith("/source/normal");
-    expect(mock.chezmoi).not.toHaveBeenCalled();
+    expect(mock.run).not.toHaveBeenCalled();
     rules.set("/source/normal", "deny");
     await expect(run(event("edit", { path: "/source/normal" }))).rejects.toThrow(
       "host permission denied",
@@ -160,7 +163,7 @@ describe("conservative V2 authorization boundary", () => {
     for (const path of ["/target", "/source/normal"]) {
       expect((await h.after(event("write", { path }))).result.content).toBe("ORIGINAL");
     }
-    expect(mock.chezmoi).not.toHaveBeenCalled();
+    expect(mock.run).not.toHaveBeenCalled();
     expect(h.permission.hook).not.toHaveBeenCalled();
     expect(h.permission.reply).not.toHaveBeenCalled();
   });
@@ -179,15 +182,13 @@ describe("conservative V2 authorization boundary", () => {
   it("fails closed on inventory errors, never reusing an earlier unmanaged result", async () => {
     const h = await harness();
     await h.before(event("write", { path: "/unmanaged" }));
-    mock.inventory.mockImplementation(() => {
-      throw new Error("lookup failed");
-    });
+    mock.inventory.mockRejectedValue(new Error("lookup failed"));
     await expect(h.before(event("write", { path: "/unmanaged" }))).rejects.toThrow("lookup failed");
     await expect(h.before(event("patch", { patchText: "*** Add File: /secret" }))).rejects.toThrow(
       "lookup failed",
     );
   });
-  it("blocks whitespace-padded headers accepted by the real 2.0.8 patch parser", async () => {
+  it("blocks whitespace-padded headers accepted by the real host patch parser", async () => {
     managed();
     const h = await harness();
     await expect(
@@ -212,17 +213,50 @@ describe("conservative V2 authorization boundary", () => {
       expect(e.input).toEqual(original);
     }
   });
-  it("leaves unrelated tools and invalid inputs to host validation", async () => {
+  it("leaves unrelated tools to the host without an inventory lookup", async () => {
     const h = await harness();
-    for (const e of [
-      event("shell", {}),
-      event("read", {}),
-      event("edit", null),
-      event("write", {}),
-      event("patch", { patchText: 3 }),
-    ])
-      await h.before(e);
+    for (const e of [event("shell", {}), event("read", {}), event("grep", null)]) await h.before(e);
     expect(mock.inventory).not.toHaveBeenCalled();
+  });
+  for (const [tool, input] of [
+    ["edit", null],
+    ["edit", "~/.bashrc"],
+    ["write", {}],
+    ["write", { path: "" }],
+    ["edit", { file_path: "~/.bashrc" }],
+    ["edit", { edits: [{ path: "~/.bashrc" }] }],
+    ["patch", { patchText: 3 }],
+    ["patch", { patch: "*** Begin Patch\n*** Add File: ~/.bashrc\n*** End Patch" }],
+    ["patch", { patchText: "*** Begin Patch\n*** End Patch" }],
+    ["apply_patch", { patchText: "*** Begin Patch\n***Add File: /x\n*** End Patch" }],
+  ] as const) {
+    it(`fails closed on uninterpretable ${tool} input ${JSON.stringify(input)}`, async () => {
+      const h = await harness();
+      await expect(h.before(event(tool, input))).rejects.toThrow(
+        `Cannot determine the target path of this ${tool} call`,
+      );
+      expect(mock.inventory).not.toHaveBeenCalled();
+    });
+  }
+  it("expands ~ against OPENCODE_TEST_HOME like the host", async () => {
+    vi.stubEnv("OPENCODE_TEST_HOME", "/test-home");
+    try {
+      managed("normal", "/test-home/managed");
+      const h = await harness();
+      await expect(h.before(event("write", { path: "~/managed" }))).rejects.toThrow(
+        "Managed target mutation blocked",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it("blocks a target below a symlinked parent directory", async () => {
+    managed("normal", "/home/u/.bashrc");
+    mock.aliases.set("/var/home/u", "/home/u");
+    const h = await harness();
+    await expect(h.before(event("edit", { path: "/var/home/u/.bashrc" }))).rejects.toThrow(
+      "Managed target mutation blocked",
+    );
   });
 });
 
@@ -264,5 +298,29 @@ describe("read advisories (mocked hook context)", () => {
     expect(
       (await h.after(event("read", { path: "/target" }), "ORIGINAL", "error")).result.content,
     ).toBe("ORIGINAL");
+  });
+  it("fails open when the advisory inventory or path resolution is unavailable", async () => {
+    managed("template");
+    const h = await harness();
+    mock.cached.mockResolvedValueOnce(null);
+    expect((await h.after(event("read", { path: "/target" }))).result.content).toBe("ORIGINAL");
+    mock.cached.mockRejectedValueOnce(new Error("boom"));
+    expect((await h.after(event("read", { path: "/target" }))).result.content).toBe("ORIGINAL");
+  });
+  it("advises through an alias of a template target", async () => {
+    managed("template");
+    mock.aliases.set("/alias", "/target");
+    const h = await harness();
+    expect((await h.after(event("read", { path: "/alias" }))).result.content).toContain(
+      "READING RENDERED OUTPUT",
+    );
+  });
+  it("stops on a symlink cycle without an advisory", async () => {
+    managed("symlink", "/a");
+    mock.sources.set("/b", { sourcePath: "/source/b", kind: "symlink" });
+    mock.links.set("/source/symlink", "/b");
+    mock.links.set("/source/b", "/a");
+    const h = await harness();
+    expect((await h.after(event("read", { path: "/a" }))).result.content).toBe("ORIGINAL");
   });
 });

@@ -25,6 +25,21 @@ describe("classifyKind — source-prefix routing", () => {
     ["encrypted_dot_netrc.age", "encrypted"], // prefix
     ["dot_secrets.asc", "encrypted"], // suffix only
     ["private_encrypted_dot_aws/credentials.age", "encrypted"], // most-restrictive wins
+    // Encrypted after other attributes, with a configured suffix other than .age/.asc.
+    ["create_encrypted_dot_netrc", "encrypted"],
+    ["create_encrypted_private_dot_token.gpg", "encrypted"],
+    ["modify_encrypted_dot_token", "encrypted"],
+    ["encrypted_private_dot_config.tmpl.age", "encrypted"],
+    ["create_dot_profile", "normal"],
+    // Attributes only count in chezmoi's order for the target type.
+    ["run_once_after_encrypted_note.sh", "run"],
+    ["symlink_encrypted_dot_x", "symlink"],
+    ["private_encrypted_dot_x", "normal"],
+    // dot_ and literal_ end attribute parsing; .literal ends suffix parsing.
+    ["dot_encrypted_notes", "normal"],
+    ["literal_encrypted_notes", "normal"],
+    ["literal_run_me.tmpl", "template"],
+    ["dot_example.tmpl.literal", "normal"],
   ];
 
   for (const [name, expected] of cases) {

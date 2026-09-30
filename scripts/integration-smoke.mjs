@@ -80,12 +80,35 @@ try {
   await assert.rejects(before("write", { path: "dangling-alias" }), /EDIT BLOCKED/);
   await assert.rejects(before("patch", { patchText: `*** Delete File: ${join(target, ".secret")}` }), /EDIT BLOCKED/);
   assert.deepEqual(readFileSync(join(source, "encrypted_dot_secret.age")), ciphertext);
+
+  // An input shape the guard cannot interpret is refused, not passed through.
+  await assert.rejects(before("edit", { file_path: join(target, ".plain") }), /Cannot determine the target path/);
+
+  // Inventories above Node's 1 MiB execFile default must still be read.
+  const bulk = join(source, "dot_bulk");
+  mkdirSync(bulk);
+  for (let i = 0; i < 2500; i++) writeFileSync(join(bulk, `${"f".repeat(180)}${i}`), "");
+  const size = execFileSync("chezmoi", ["managed", "--include=files,symlinks", "--path-style=all", "--format=json"], { maxBuffer: 1 << 26 }).length;
+  assert.ok(size > 1 << 20, `bulk inventory is ${size} bytes`);
+  await before("write", { path: join(target, "unmanaged") });
+  await assert.rejects(before("write", { path: join(target, ".bulk", `${"f".repeat(180)}7`) }), /Managed target mutation blocked/);
+  rmSync(bulk, { recursive: true });
+
+  // A symlinked destination (e.g. /home -> /var/home): chezmoi reports the
+  // link path, the write addresses the real one.
+  const linked = join(root, "linked-home");
+  symlinkSync(target, linked);
+  const linkedArgv = argv.map((arg) => (arg === target ? linked : arg));
+  writeFileSync(join(bin, "chezmoi"), `#!/bin/sh\nexec ${[binary, ...linkedArgv].map(quote).join(" ")} "$@"\n`, { mode: 0o755 });
+  assert.match(execFileSync("chezmoi", ["managed", "--path-style=absolute"], { encoding: "utf8" }), new RegExp(`${linked}/\\.plain`));
+  await assert.rejects(before("write", { path: join(target, ".plain") }), /Managed target mutation blocked/);
+  await assert.rejects(before("write", { path: join(linked, ".plain") }), /Managed target mutation blocked/);
   // Malformed configuration must not turn a managed/encrypted path into an
   // unmanaged one, and must not reuse the earlier successful inventory.
   writeFileSync(config, "invalid = [");
   await assert.rejects(before("write", { path: ".secret" }), /lookup failed/);
   await assert.rejects(before("write", { path: "unmanaged" }), /lookup failed/);
-  console.log("Real-chezmoi / mocked-host smoke passed: all managed mutations blocked, explicit source input unchanged, no auto-apply, encrypted refusal, lookup failure closed.");
+  console.log("Real-chezmoi / mocked-host smoke passed: all managed mutations blocked, explicit source input unchanged, no auto-apply, encrypted refusal, unknown input refused, >1 MiB inventory, symlinked destination, lookup failure closed.");
 } finally {
   await cleanup?.();
   process.env.PATH = previousPath;
