@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/chezmoi-guard",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Native OpenCode V2 guard: block managed target mutations, guide explicit source edits, and preserve host permission checks.",
   "license": "MIT",
   "author": "Dylan Russell",
